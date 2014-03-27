@@ -1,0 +1,12 @@
+
+haskell-tor
+===========
+
+Gathering place for research and software artifacts leading to building a Tor node in haskell.
+
+Contributors
+------------
+
+* kcarter
+
+
