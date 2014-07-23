@@ -1,0 +1,52 @@
+import Test.Alert
+import Test.Block
+import Test.Certificate
+import Test.ChangeCipher
+import Test.CipherSuite
+import Test.ClientCertificateType
+import Test.CompressionMethod
+import Test.DiffieHellman
+import Test.DistinguishedName
+import Test.Encryptor
+import Test.Framework.Runners.Console
+import Test.Handshake
+import Test.HashAlgorithm
+import Test.HMAC
+import Test.PRF
+import Test.ProtocolVersion
+import Test.Random
+import Test.RC4
+import Test.Records
+import Test.Session
+import Test.SignatureAlgorithm
+import Test.Stream
+import Test.TripleDES
+import Test.Word24
+
+main :: IO ()
+main =
+  defaultMain [
+    word24Tests
+  , alertTests
+  , blockTests
+  , certificateTests
+  , changeCipherTests
+  , cipherSuiteTests
+  , clientCertificateTypeTests
+  , compressionMethodTests
+  , diffieHellmanTests
+  , distinguishedNameTests
+  , encryptorTests
+  , hmacTests
+  , handshakeTests
+  , hashAlgorithmTests
+  , prfTests
+  , protocolVersionTests
+  , rc4Tests
+  , randomTests
+  , recordsTests
+  , sessionTests
+  , signatureAlgorithmTests
+  , streamTests
+  , tripleDESTests
+  ]
