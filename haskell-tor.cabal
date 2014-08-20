@@ -19,23 +19,37 @@ library
   build-depends:
                       asn1-encoding              >= 0.8   && < 0.10,
                       asn1-types                 >= 0.2   && < 0.4,
+                      attoparsec                 >= 0.12  && < 0.14,
                       base                       >= 4.7   && < 5.0,
+                      base64-bytestring          >= 1.0   && < 1.2,
                       binary                     >= 0.7   && < 0.9,
                       bytestring                 >= 0.10  && < 0.11,
                       cereal                     >= 0.4   && < 0.6,
                       cipher-aes128              >= 0.6   && < 0.8,
+                      containers                 >= 0.5   && < 0.7,
                       crypto-api                 >= 0.13  && < 0.15,
+                      crypto-pubkey-types        >= 0.4   && < 0.6,
                       DRBG                       >= 0.5   && < 0.7,
                       entropy                    >= 0.3   && < 0.5,
+                      fingertree                 >= 0.1   && < 0.3,
                       monadLib                   >= 3.7   && < 3.9,
+                      network                    >= 2.5   && < 2.7,
+                      old-locale                 >= 1.0   && < 1.2,
                       pureMD5                    >= 2.1   && < 2.3,
                       RSA                        >= 2.0.0 && < 2.2,
                       SHA                        >= 1.6   && < 1.8,
+                      stm                        >= 2.4   && < 2.6,
                       tagged                     >= 0.7   && < 0.9,
                       time                       >= 1.4   && < 1.6,
                       x509                       >= 1.4   && < 1.6
 
   exposed-modules:
+                      Codec.Compression.Zlib.Adler32,
+                      Codec.Compression.Zlib.Deflate,
+                      Codec.Compression.Zlib.HuffmanTree,
+                      Codec.Compression.Zlib.Monad,
+                      Codec.Compression.Zlib.OutputWindow,
+                      Codec.Compression.Zlib,
                       Data.Binary.TLSVector,
                       Data.Word24,
                       TLS.Alert,
@@ -43,7 +57,6 @@ library
                       TLS.Certificate.DistinguishedName,
                       TLS.Certificate,
                       TLS.ChangeCipher,
-                      TLS.CipherSuite,
                       TLS.CipherSuite.Block,
                       TLS.CipherSuite.Encryptor,
                       TLS.CipherSuite.HashAlgorithm,
@@ -55,11 +68,11 @@ library
                       TLS.CipherSuite.SignatureAlgorithm,
                       TLS.CipherSuite.Stream,
                       TLS.CipherSuite.TripleDES,
+                      TLS.CipherSuite,
                       TLS.CompressionMethod,
                       TLS.Context.Explicit,
                       TLS.Context.Implicit,
                       TLS.DiffieHellman,
-                      TLS.Handshake,
                       TLS.Handshake.Certificate,
                       TLS.Handshake.CertificateRequest,
                       TLS.Handshake.CertificateVerify,
@@ -72,35 +85,38 @@ library
                       TLS.Handshake.ServerHelloDone,
                       TLS.Handshake.ServerKeyExchange,
                       TLS.Handshake.Type,
+                      TLS.Handshake,
                       TLS.Negotiation,
                       TLS.ProtocolVersion,
                       TLS.Random,
                       TLS.Records.ContentType,
-                      TLS.Session
+                      TLS.Session,
+                      Tor.DataFormat.Consensus,
+                      Tor.DataFormat.DefaultDirectory,
+                      Tor.DataFormat.DirCertInfo,
+                      Tor.DataFormat.Helpers,
+                      Tor.DataFormat.RouterDesc,
+                      Tor.NetworkStack.Fetch,
+                      Tor.NetworkStack.System,
+                      Tor.NetworkStack,
+                      Tor.RouterDesc.Render,
+                      Tor.RouterDesc,
+                      Tor.State.Credentials,
+                      Tor.State.Directories,
+                      Tor.State.RNG,
+                      Tor.State.Routers,
+                      Tor.State
 
 executable haskell-tor
   main-is:            Main.hs
   default-language:   Haskell2010
   ghc-options:        -Wall
   build-depends:
-                      asn1-encoding              >= 0.8   && < 0.10,
-                      asn1-types                 >= 0.2   && < 0.4,
                       base                       >= 4.7   && < 5.0,
-                      binary                     >= 0.7   && < 0.9,
-                      bytestring                 >= 0.10  && < 0.11,
-                      crypto-api                 >= 0.13  && < 0.15,
-                      cryptohash-cryptoapi       >= 0.1   && < 0.2,
-                      DRBG                       >= 0.5   && < 0.7,
                       haskell-tor                >= 0.1   && < 0.3,
-                      monadLib                   >= 3.7   && < 3.9,
-                      network                    >= 2.5   && < 2.6,
-                      RSA                        >= 2.0.0 && < 2.2,
-                      SHA                        >= 1.6   && < 1.8,
-                      tagged                     >= 0.7   && < 0.9,
-                      time                       >= 1.4   && < 1.6,
-                      x509                       >= 1.4   && < 1.6
-
-
+                      network                    >= 2.5   && < 2.7,
+                      old-locale                 >= 1.0   && < 1.2,
+                      time                       >= 1.4   && < 1.6
 
 test-suite test-tor
   type:               exitcode-stdio-1.0

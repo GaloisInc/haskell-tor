@@ -22,11 +22,13 @@ import Test.SignatureAlgorithm
 import Test.Stream
 import Test.TripleDES
 import Test.Word24
+import Test.Zlib
 
 main :: IO ()
 main =
   defaultMain [
     word24Tests
+  , zlibTests
   , alertTests
   , blockTests
   , certificateTests
