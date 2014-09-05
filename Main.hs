@@ -1,17 +1,16 @@
-import Control.Concurrent(forkIO)
+import Control.Concurrent(forkIO,threadDelay)
 import Control.Monad
 import Data.Time
 import Data.Version hiding (Version)
 import Data.Word
 import Network.Socket hiding (recv)
-import Network.Socket.ByteString.Lazy(sendAll, recv)
 import System.Console.GetOpt
 import System.Environment
 import System.Exit
 import System.IO
 import System.Locale
-import TLS.Context.Explicit
-
+import Tor.DataFormat.TorCell
+import Tor.Link
 import Tor.NetworkStack.System
 import Tor.State
 
@@ -62,14 +61,23 @@ runTorNode flags =
   do logger        <- generateLogger flags
      let onionPort =  getOnionPort flags
      torState      <- initializeTorState systemNetworkStack logger
-     -- start the onion socket
-     return ()
+     _             <- forkIO (torServerPort torState onionPort)
+     mlink <- initializeClientTorLink torState (IP4 "127.0.0.1") 9001
+     case mlink of
+       Left err ->
+         putStrLn ("Couldn't build connection: " ++ err)
+       Right link ->
+         forever $
+           do cell <- getNextCell link
+              putStrLn (show cell)
+     forever (threadDelay 100000000)
 
 torServerPort :: TorState a b -> Word16 -> IO ()
 torServerPort torState onionPort =
   do lsock <- socket AF_INET Stream defaultProtocol
      bind lsock (SockAddrInet (PortNum onionPort) iNADDR_ANY)
      listen lsock 3
+     logMsg torState ("Waiting for Tor connections on port " ++ show onionPort)
      forever $ do (sock, addr) <- accept lsock
                   logMsg torState ("Accepted TCP connection from " ++ show addr)
                   forkIO (runServerConnection torState sock)
@@ -77,13 +85,6 @@ torServerPort torState onionPort =
 runServerConnection :: TorState a b -> Socket -> IO ()
 runServerConnection torState sock =
   do undefined torState sock
-
-toIOSystem :: Socket -> IOSystem
-toIOSystem sock = IOSystem {
-    ioRead  = recv sock . fromIntegral
-  , ioWrite = sendAll sock
-  , ioFlush = return ()
-  }
 
 -- -----------------------------------------------------------------------------
 

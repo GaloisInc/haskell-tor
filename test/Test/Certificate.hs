@@ -1,3 +1,4 @@
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE RecordWildCards #-}
 module Test.Certificate(certificateTests) where
 
@@ -19,6 +20,9 @@ import Test.Standard
 import TLS.Certificate
 
 instance Arbitrary ASN1Cert where
+  arbitrary = ASN1Cert <$> arbitrary
+
+instance Arbitrary (SignedExact Certificate) where
   arbitrary =
     do certVersion      <- arbitrary
        certSerial       <- arbitrary
@@ -48,7 +52,7 @@ instance Arbitrary ASN1Cert where
                         HashSHA512 -> wrapSignatureAlg certSignatureAlg sha512
                         _          -> error "INTERNAL WEIRDNESS"
        let (signedCert, _) = objectToSignedExact sigfun baseCert
-       return (ASN1Cert signedCert)
+       return signedCert
 
 -- ----------------------------------------------------------------------------
 

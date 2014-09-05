@@ -1,4 +1,4 @@
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE RecordWildCards  #-}
 module TLS.CipherSuite.Block(
          BlockEncryptor
        , buildBlockEncryptor
@@ -17,7 +17,7 @@ import TLS.CipherSuite.HMAC
 import TLS.ProtocolVersion
 import TLS.Records.ContentType
 
-data BlockCipher k => BlockEncryptor k = BlockEncryptor {
+data BlockEncryptor k = BlockEncryptor {
        myMACKey        :: ByteString
      , theirMACKey     :: ByteString
      , myWriteKey      :: k

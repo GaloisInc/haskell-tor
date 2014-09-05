@@ -5,13 +5,24 @@ module Tor.State(
          TorState
        , initializeTorState
        , logMsg
+       , addLocalAddress
+       , getLocalAddresses
+       , getNetworkStack
+       , getSigningCredentials
+       , Tor.State.withRNG
        )
  where
 
+import Control.Concurrent
+import Control.Concurrent.STM
+import Control.Monad
+import Data.Time
+import Data.X509
+import Tor.DataFormat.TorCell
 import Tor.NetworkStack
 import Tor.State.Credentials
 import Tor.State.Directories
-import Tor.State.RNG
+import Tor.State.RNG as RNG
 import Tor.State.Routers
 
 data TorState ls s = TorState {
@@ -21,6 +32,7 @@ data TorState ls s = TorState {
      , tsCredentials :: Credentials
      , tsDirectories :: DirectoryDB
      , tsRouters     :: RouterDB
+     , tsAddresses   :: TVar [TorAddress]
      }
 
 initializeTorState :: TorNetworkStack ls s -> (String -> IO ()) ->
@@ -30,12 +42,47 @@ initializeTorState tsNetwork tsLogger =
      tsDirectories <- newDirectoryDatabase tsNetwork tsLogger defaultDirectories
      tsCredentials <- newCredentials tsRNG tsLogger
      tsRouters     <- newRouterDatabase tsNetwork tsRNG tsDirectories tsLogger
+     tsAddresses   <- newTVarIO []
      return TorState{..}
 
 -- ----------------------------------------------------------------------------
 
 logMsg :: TorState ls s -> String -> IO ()
 logMsg = tsLogger
+
+addLocalAddress :: TorState ls s -> TorAddress -> IO ()
+addLocalAddress _ (TransientError _) = return ()
+addLocalAddress _ (NontransientError _) = return ()
+addLocalAddress ts x =
+  do msg <- atomically $ do current <- readTVar (tsAddresses ts)
+                            if x `elem` current
+                               then return ""
+                               else do writeTVar (tsAddresses ts) (x : current)
+                                       return ("Added new address: " ++
+                                               unTorAddress x)
+     unless (msg == "") $
+       logMsg ts msg
+
+getLocalAddresses :: TorState ls s -> IO [TorAddress]
+getLocalAddresses = atomically . readTVar . tsAddresses
+
+getNetworkStack :: TorState ls s -> TorNetworkStack ls s
+getNetworkStack = tsNetwork
+
+getSigningCredentials :: TorState ls s -> IO (SignedCertificate, PrivKey)
+getSigningCredentials s =
+  do now <- getCurrentTime
+     (cert, priv, next) <- atomically (getSigningKey (tsCredentials s) now)
+     case next of
+       Nothing     -> return ()
+       Just action ->
+         do _ <- forkIO $ do msg <- atomically (action (tsRNG s))
+                             logMsg s msg
+            return ()
+     return (cert, priv)
+
+withRNG :: TorState ls s -> (TorRNG -> (a, TorRNG)) -> IO a
+withRNG s f = RNG.withRNG (tsRNG s) f
 
 -- ----------------------------------------------------------------------------
 

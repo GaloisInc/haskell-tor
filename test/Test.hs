@@ -20,6 +20,7 @@ import Test.Records
 import Test.Session
 import Test.SignatureAlgorithm
 import Test.Stream
+import Test.TorCell
 import Test.TripleDES
 import Test.Word24
 import Test.Zlib
@@ -28,6 +29,7 @@ main :: IO ()
 main =
   defaultMain [
     word24Tests
+  , torCellTests
   , zlibTests
   , alertTests
   , blockTests

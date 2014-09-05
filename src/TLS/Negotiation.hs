@@ -29,7 +29,7 @@ import TLS.CipherSuite.KeyExchangeAlgorithm
 import TLS.CipherSuite.PRF
 import TLS.CipherSuite.SignatureAlgorithm
 import TLS.CompressionMethod
-import TLS.Context.Explicit
+import TLS.Context
 import TLS.DiffieHellman
 import TLS.Handshake.Certificate
 import TLS.Handshake.CertificateRequest
@@ -81,12 +81,13 @@ data TLSServerOptions = TLSServerOptions {
 clientNegotiate :: IOSystem -> TLSClientOptions -> IO TLSContext
 clientNegotiate iosys tlsopt =
   do -- generate and send the ClientHello message
-     g                 <- generateTempRandomGen
+     g <- generateTempRandomGen
      (clientHello, g') <- generateClientHello g tlsopt
-     c0                <- initialContext iosys
-     c1                <- writeHandshake (startRecording c0) clientHello
+     c <- initialContext iosys
+     startRecording c
+     writeHandshake c clientHello
      -- get the ServerHello
-     (c2, serverHello) <- nextHandshakeRecord (c1 :: TLSContext) ()
+     serverHello <- nextHandshakeRecord c ()
      let cipherSuite   = shCipherSuite serverHello
          serverExts    = shExtensions serverHello
      unless (cipherSuite `elem` acceptableCipherSuites tlsopt) $
@@ -94,10 +95,11 @@ clientNegotiate iosys tlsopt =
      unless (legalServerExtensions serverExts (chExtensions clientHello)) $
        fail "Server send incompatible extensions."
      -- if the cipher rewquires a certificate, we should get it.
-     (c3, mServerCert) <- maybeGetHandshake c2 () :: IO (TLSContext, Maybe Certificate)
+     mServerCert <- maybeGetHandshake c () :: IO (Maybe Certificate)
      unless (isJust mServerCert == cipherRequiresServerCert cipherSuite) $
        fail "Server sent unexpected certificate."
      let serverCerts = cCertificateList `fmap` mServerCert :: Maybe [ASN1Cert]
+     setServerCertificates c serverCerts
      certsValidate <- validateServerCerts tlsopt serverCerts
      unless certsValidate $ fail "Server certificates were unacceptable."
      let serverPublic = case cCertificateList `fmap` mServerCert of
@@ -106,7 +108,7 @@ clientNegotiate iosys tlsopt =
                           Just (cert1:_) -> certificatePublicKey cert1
      -- unless we're in a weird situation, we should probably get a server
      -- key exchange message.
-     (c4, mServerKeyExch) <- maybeGetHandshake c3 cipherSuite
+     mServerKeyExch <- maybeGetHandshake c cipherSuite
      case mServerKeyExch of
        Nothing ->
          return ()
@@ -128,32 +130,30 @@ clientNegotiate iosys tlsopt =
             unless (signatureValidates hasha siga serverPublic msg sig) $
               fail "Invalid key exchange signature."
      -- we may get a certificate request for ourselves
-     (c5, mcr) <- maybeGetHandshake c4 (shServerVersion serverHello)
-                    :: IO (TLSContext, Maybe CertificateRequest)
+     mcr <- maybeGetHandshake c (shServerVersion serverHello)
+                    :: IO (Maybe CertificateRequest)
      when (isJust mcr && cipherKeyExchangeAlgorithm cipherSuite == ExchDH_anon)$
        fail "Anonmous server requested client certificate."
      -- but we should always get a ServerHelloDone
-     (c6, _) <- nextHandshakeRecord c5 () :: IO (TLSContext, ServerHelloDone)
+     _ <- nextHandshakeRecord c () :: IO ServerHelloDone
      -- Our turn. If we got a certificate request, we should send it.
-     c7 <- if isJust mcr
-            then let c = Certificate{cCertificateList=clientCertificates tlsopt}
-                 in writeHandshake c6 c
-            else return c6
+     when (isJust mcr) $
+       do let cert = Certificate{cCertificateList=clientCertificates tlsopt}
+          writeHandshake c cert
      -- Write the client key exchange information.
      let sParams = maybe (error "ServerDHParams required but not available.")
                          skeParams mServerKeyExch
      (clientKeyExch, preMasterSecret, _) <-
             computePreMasterSecret g' sParams cipherSuite serverPublic
-     c8 <- writeHandshake c7 clientKeyExch
+     writeHandshake c clientKeyExch
      -- send a verification of our claimed certificated, if required.
-     c9 <- if cipherRequiresClientCertVerification cipherSuite
-             then let msgs    = emitRecording c8
-                      siga    = cipherSignatureAlgorithm cipherSuite
-                      hasha   = cipherHashAlgorithm cipherSuite
-                      privkey = clientPrivateKey tlsopt
-                      cver    = generateCertVerify siga hasha privkey msgs
-                  in writeHandshake c8 cver
-             else return c8
+     when (isJust mcr && cipherRequiresClientCertVerification cipherSuite) $
+       do msgs <- emitRecording c
+          let siga    = cipherSignatureAlgorithm cipherSuite
+              hasha   = cipherHashAlgorithm cipherSuite
+              privkey = clientPrivateKey tlsopt
+              cver    = generateCertVerify siga hasha privkey msgs
+          writeHandshake c cver
      -- Compute the master secret
      let masterSecretInf = prf preMasterSecret "master secret" $ runPut $ do
                              putRandom (chRandom clientHello)
@@ -167,30 +167,33 @@ clientNegotiate iosys tlsopt =
          encryptor       = cipherEncryptor cipherSuite cMAC sMAC
                                            cWrite sWrite cIV sIV
          compressor      = getCompressor (shCompressionMethod serverHello)
-     let c10 = setNextCipherSuite c9 compressor encryptor
-         cHandshakeMessages = emitRecording c10
-         handshakeHash = sha256' cHandshakeMessages
+     setNextCipherSuite c compressor encryptor
+     cHandshakeMessages <- emitRecording c
+     let handshakeHash = sha256' cHandshakeMessages
          cVerifyDataInf = prf masterSecret "client finished" handshakeHash
          verifyDataLen = cipherVerifyDataLength cipherSuite
          cVerifyData = BS.take verifyDataLen cVerifyDataInf
-     c11 <- sendChangeCipherSpec c10
-     c12 <- writeHandshake c11 (Finished cVerifyData)
-     c13 <- receiveChangeCipherSpec c12
-     let sHandshakeMessages = emitRecording c13
-         handshakeHash'     = sha256' sHandshakeMessages
+     sendChangeCipherSpec c
+     writeHandshake c (Finished cVerifyData)
+     receiveChangeCipherSpec c
+     sHandshakeMessages <- emitRecording c
+     let handshakeHash'     = sha256' sHandshakeMessages
          sVerifyDataInf     = prf masterSecret "server finished" handshakeHash'
          sVerifyData        = BS.take verifyDataLen sVerifyDataInf
-     (c14, Finished sVerifyData') <- nextHandshakeRecord c13 ()
+     Finished sVerifyData' <- nextHandshakeRecord c ()
      unless (sVerifyData == sVerifyData') $
        fail "Final verification check failed."
-     return (endRecording c14)
+     endRecording c
+     setTLSSecrets c (chRandom clientHello) (shRandom serverHello) masterSecret
+     return c
 
 serverNegotiate :: IOSystem -> TLSServerOptions -> IO TLSContext
 serverNegotiate iosys opts =
-  do g0                <- generateTempRandomGen
-     c0                <- startRecording `fmap` initialContext iosys
+  do g0 <- generateTempRandomGen
+     c  <- initialContext iosys
+     startRecording c
      -- get the ClientHello
-     (c1, cHello) <- nextHandshakeRecord c0 ()
+     cHello <- nextHandshakeRecord c ()
      unless (chSessionID cHello == EmptySession) $
        fail "FIXME: Library doesn't support session restarts."
      unless (chClientVersion cHello == versionTLS1_2) $
@@ -226,36 +229,36 @@ serverNegotiate iosys opts =
                   , shCompressionMethod = comprAlg
                   , shExtensions        = []
                   }
-     c2 <- writeHandshake c1 sHello
-     c3 <- if cipherRequiresServerCert cipherSuite
-              then writeHandshake c2 (Certificate (serverCertificates opts))
-              else return c2
-     (c4, _, a) <- maybeSendServerKeyEx c3 g2 cipherSuite opts
-                                        clientRand serverRand
-     c5 <- if shouldRequestCertificate cipherSuite opts
-              then writeHandshake c4 CertificateRequest {
-                     crCertificateTypes = acceptableCertTypes opts
-                   , crSupportedSignatureAlgorithms = acceptableSigAlgs opts
-                   , crCertificateAuthorities = acceptableCAs opts
-                   }
-              else return c4
-     c6 <- writeHandshake c5 ServerHelloDone
-     (c7, clientPubKey) <- if shouldRequestCertificate cipherSuite opts
-                             then readValidateClientCertificate c6 opts
-                             else return (c6, error "No public key for client.")
-     (c8,cke) <- nextHandshakeRecord c7 (cipherKeyExchangeAlgorithm cipherSuite)
-     preMaster <- computeServerPreMasterSecret cipherSuite a cke opts 
-     c9 <- if (shouldRequestCertificate cipherSuite opts) &&
-              cipherRequiresClientCertVerification cipherSuite
-             then do (c', cv) <- nextHandshakeRecord c8 ()
-                     let ok = signatureValidates (cvHashAlgorithm cv)
-                                                  (cvSignatureAlgorithm cv)
-                                                  clientPubKey
-                                                  (emitRecording c8)
-                                                  (cvSignature cv)
-                     unless ok $ fail "Certificate validation failed!"
-                     return c'
-             else return c8
+     writeHandshake c sHello
+     when (cipherRequiresServerCert cipherSuite) $
+       writeHandshake c (Certificate (serverCertificates opts))
+     setServerCertificates c (Just (serverCertificates opts))
+     (_, a) <- maybeSendServerKeyEx c g2 cipherSuite opts clientRand serverRand
+     when (shouldRequestCertificate cipherSuite opts) $
+       writeHandshake c CertificateRequest {
+         crCertificateTypes = acceptableCertTypes opts
+       , crSupportedSignatureAlgorithms = acceptableSigAlgs opts
+       , crCertificateAuthorities = acceptableCAs opts
+       }
+     writeHandshake c ServerHelloDone
+     clientPubKey <- if shouldRequestCertificate cipherSuite opts
+                             then readValidateClientCertificate c opts
+                             else return (error "No public key for client.")
+     cke <- nextHandshakeRecord c (cipherKeyExchangeAlgorithm cipherSuite)
+     preMaster <- computeServerPreMasterSecret cipherSuite a cke opts
+     when ((shouldRequestCertificate cipherSuite opts) &&
+           cipherRequiresClientCertVerification cipherSuite) $
+       do cv <- nextHandshakeRecord c ()
+          rec <- emitRecording c
+          let hash   = cvHashAlgorithm cv
+              sigalg = cvSignatureAlgorithm cv
+              sig    = cvSignature cv
+              ok = signatureValidates (cvHashAlgorithm cv)
+                                       (cvSignatureAlgorithm cv)
+                                       clientPubKey rec
+                                       (cvSignature cv)
+          unless (signatureValidates hash sigalg clientPubKey rec sig) $
+            fail "Certificate validation failed!"
      let masterSecretInf = prf preMaster "master secret" $ runPut $ do
                              putRandom clientRand
                              putRandom serverRand
@@ -268,43 +271,45 @@ serverNegotiate iosys opts =
          encryptor       = cipherEncryptor cipherSuite sMAC cMAC
                                            sWrite cWrite sIV cIV
          compressor      = getCompressor comprAlg
-         c10             = setNextCipherSuite c9 compressor encryptor
-     c11 <- receiveChangeCipherSpec c10
-     (c12, Finished cVerifyData') <- nextHandshakeRecord c11 ()
+     setNextCipherSuite c compressor encryptor
+     receiveChangeCipherSpec c
+     Finished cVerifyData' <- nextHandshakeRecord c ()
      let verifyDataLen      = cipherVerifyDataLength cipherSuite
-         cHandshakeMessages = emitRecording c11
-         cHandshakeHash     = sha256' cHandshakeMessages
+     cHandshakeMessages <- emitRecording c
+     let cHandshakeHash     = sha256' cHandshakeMessages
          cVerifyDataInf     = prf masterSecret "client finished" cHandshakeHash
          cVerifyData        = BS.take verifyDataLen cVerifyDataInf
      unless (cVerifyData == cVerifyData') $
        fail "Final verification check failed."
-     c13 <- sendChangeCipherSpec c12
-     let sHandshakeMessages = emitRecording c12
-         sHandshakeHash     = sha256' sHandshakeMessages
+     sendChangeCipherSpec c
+     sHandshakeMessages <- emitRecording c
+     let sHandshakeHash     = sha256' sHandshakeMessages
          sVerifyDataInf     = prf masterSecret "server finished" sHandshakeHash
          sVerifyData        = BS.take verifyDataLen sVerifyDataInf
-     c14 <- writeHandshake c13 (Finished sVerifyData)
-     return (endRecording c14)
+     writeHandshake c (Finished sVerifyData)
+     endRecording c
+     setTLSSecrets c (chRandom cHello) (shRandom sHello) masterSecret
+     return c
 
 maybeSendServerKeyEx :: CryptoRandomGen g =>
                         TLSContext -> g -> CipherSuite -> TLSServerOptions ->
                         Random -> Random ->
-                        IO (TLSContext, g, Integer)
+                        IO (g, Integer)
 maybeSendServerKeyEx c g cipherSuite opts clientRandom serverRandom =
   case cipherKeyExchangeAlgorithm cipherSuite of
     ExchDHE_DSS ->
-      do c' <- writeHandshake c ske
-         return (c', g', a)
+      do writeHandshake c ske
+         return (g', a)
     ExchDHE_RSA ->
-      do c' <- writeHandshake c ske
-         return (c', g', a)
+      do writeHandshake c ske
+         return (g', a)
     ExchDH_anon ->
-      do c' <- writeHandshake c (ServerKeyExchangeAnon dhParams)
-         return (c', g', a)
-    ExchRSA     -> return (c, g, error "No legit DH private value for suite.")
-    ExchDH_DSS  -> return (c, g, error "No legit DH private value for suite.")
-    ExchDH_RSA  -> return (c, g, error "No legit DH private value for suite.")
-    ExchNull    -> return (c, g, error "No legit DH private value for suite.")
+      do writeHandshake c (ServerKeyExchangeAnon dhParams)
+         return (g', a)
+    ExchRSA     -> return (g, error "No legit DH private value for suite.")
+    ExchDH_DSS  -> return (g, error "No legit DH private value for suite.")
+    ExchDH_RSA  -> return (g, error "No legit DH private value for suite.")
+    ExchNull    -> return (g, error "No legit DH private value for suite.")
  where
   hashAlg = cipherHashAlgorithm cipherSuite
   sigAlg  = cipherSignatureAlgorithm cipherSuite
@@ -468,9 +473,9 @@ shouldRequestCertificate suite opts =
   (shouldAskForClientCert opts)
 
 readValidateClientCertificate :: TLSContext -> TLSServerOptions ->
-                                 IO (TLSContext, PubKey)
+                                 IO PubKey
 readValidateClientCertificate c opts =
-  do (c', ccerts) <- nextHandshakeRecord c ()
+  do ccerts <- nextHandshakeRecord c ()
      case cCertificateList ccerts of
        [] ->
         fail "Received empty certificate list!"
@@ -478,7 +483,7 @@ readValidateClientCertificate c opts =
          do res <- validateClientCerts opts certs
             unless res $
               fail "Client certificates failed validation."
-            return (c', certificatePublicKey first)
+            return (certificatePublicKey first)
 
 sha256' :: ByteString -> ByteString
 sha256' = bytestringDigest . sha256

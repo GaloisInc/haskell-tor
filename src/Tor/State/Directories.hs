@@ -65,8 +65,7 @@ newDirectoryDatabase ns logMsg defaultStrs =
                       do logMsg ("Weird: fingerprint mismatch. Ignoring dir.")
                          return Nothing
                     (Right i, Just _) ->
-                      do logMsg ("Fetched. Installing default directory.")
-                         return $ Just $ Directory {
+                      do return $ Just $ Directory {
                            dirNickname = ddirNickname d
                          , dirIsBridge = ddirIsBridge d
                          , dirAddress = ddirAddress d

@@ -10,6 +10,10 @@ module TLS.Certificate(
        , getDiffieHellmanPublic
        , getDiffieHellmanPrivate
        , wrapSignatureAlg
+       , keyHash
+       , certificateHash
+       , certExpired
+       , isSignedBy
        )
  where
 
@@ -17,7 +21,11 @@ import Codec.Crypto.RSA.Exceptions
 import Control.Applicative
 import Control.Monad
 import Crypto.Random.DRBG
+import Crypto.Types.PubKey.RSA
+import Data.ASN1.BinaryEncoding
+import Data.ASN1.Encoding
 import Data.ASN1.OID
+import Data.ASN1.Types
 import Data.Binary.Get
 import Data.Binary.Put
 import Data.ByteString.Lazy(ByteString)
@@ -103,3 +111,49 @@ wrapSignatureAlg name sha bstr =
       stricted = BSS.concat (BS.toChunks hashed)
   in (stricted, name, ())
 
+-- ----------------------------------------------------------------------------
+
+keyHash :: (ByteString -> Digest a) -> Certificate -> ByteString
+keyHash hash cert = bytestringDigest (hash (encodeASN1 DER asn1))
+ where
+  asn1   = case certPubKey cert of
+             PubKeyRSA k ->
+               let n = public_n k
+                   e = public_e k
+               in [Start Sequence, IntVal n, IntVal e, End Sequence]
+             _ ->
+               error "Unknown key type in keyHash."
+
+certificateHash :: (ByteString -> Digest a) -> Certificate -> ByteString
+certificateHash hash cert =
+  bytestringDigest (hash (encodeASN1 DER (toASN1 cert [])))
+
+
+-- ----------------------------------------------------------------------------
+
+certExpired :: Certificate -> UTCTime -> Bool
+certExpired cert t = (aft > t) || (t > unt)
+ where (aft, unt) = certValidity cert
+
+isSignedBy :: SignedCertificate -> Certificate -> Bool
+isSignedBy cert bycert =
+  case signedAlg (getSigned cert) of
+    SignatureALG_Unknown _             -> False
+    SignatureALG HashMD2 PubKeyALG_RSA -> False
+    SignatureALG hashAlg PubKeyALG_RSA ->
+      case certPubKey bycert of
+        PubKeyRSA pubkey ->
+          let sig  = BS.fromStrict (signedSignature (getSigned cert))
+              bstr = BS.fromStrict (getSignedData cert)
+              hash = hashAlgToHashInfo hashAlg
+          in rsassa_pkcs1_v1_5_verify hash pubkey bstr sig
+        _ -> False
+    SignatureALG _ _     -> False
+ where
+  hashAlgToHashInfo HashMD2    = error "Internal error."
+  hashAlgToHashInfo HashMD5    = hashMD5
+  hashAlgToHashInfo HashSHA1   = hashSHA1
+  hashAlgToHashInfo HashSHA224 = hashSHA224
+  hashAlgToHashInfo HashSHA256 = hashSHA256
+  hashAlgToHashInfo HashSHA384 = hashSHA384
+  hashAlgToHashInfo HashSHA512 = hashSHA512

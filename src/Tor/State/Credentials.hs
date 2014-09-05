@@ -3,6 +3,7 @@
 {-# LANGUAGE RecordWildCards   #-}
 module Tor.State.Credentials(
          Credentials
+       , createCertificate
        , newCredentials
        , getSigningKey
        , getOnionKey
@@ -166,7 +167,7 @@ createCertificate certPubKey sigKey certSerial cName certValidity = signedCert
   certVersion      = 3
   certExtensions   = Extensions Nothing
   certSubjectDN    = makeDN cName
-  certIssuerDN     = makeDN "haskell tor"
+  certIssuerDN     = makeDN "haskell"
   makeDN str       = DistinguishedName [
                        (getObjectID DnCommonName,       fromString str)
                      , (getObjectID DnCountry,          "US")

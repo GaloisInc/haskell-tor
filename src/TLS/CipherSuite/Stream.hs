@@ -1,4 +1,4 @@
-{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE RecordWildCards  #-}
 module TLS.CipherSuite.Stream(
          TLSStreamCipher(..)
        , StreamEncryptor
@@ -21,7 +21,7 @@ class TLSStreamCipher k where
   encryptStream  :: k -> ByteString -> ByteString
   decryptStream  :: k -> ByteString -> ByteString
 
-data TLSStreamCipher k => StreamEncryptor k = StreamEncryptor {
+data StreamEncryptor k = StreamEncryptor {
        myMACKey        :: ByteString
      , theirMACKey     :: ByteString
      , myWriteKey      :: k
