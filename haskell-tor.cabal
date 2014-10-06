@@ -17,6 +17,7 @@ library
   hs-source-dirs:     src
 
   build-depends:
+                      array                      >= 0.5   && < 0.7,
                       asn1-encoding              >= 0.8   && < 0.10,
                       asn1-types                 >= 0.2   && < 0.4,
                       attoparsec                 >= 0.12  && < 0.14,
@@ -35,13 +36,17 @@ library
                       monadLib                   >= 3.7   && < 3.9,
                       network                    >= 2.5   && < 2.7,
                       old-locale                 >= 1.0   && < 1.2,
+                      pretty-hex                 >= 1.0   && < 1.2,
                       pureMD5                    >= 2.1   && < 2.3,
-                      RSA                        >= 2.0.0 && < 2.2,
-                      SHA                        >= 1.6   && < 1.8,
+                      RSA                        >= 2.1.0 && < 2.2,
+                      SHA                        >= 2     && < 2.2,
                       stm                        >= 2.4   && < 2.6,
                       tagged                     >= 0.7   && < 0.9,
                       time                       >= 1.4   && < 1.6,
                       x509                       >= 1.4   && < 1.6
+
+  other-modules:
+                      Paths_haskell_tor
 
   exposed-modules:
                       Codec.Compression.Zlib.Adler32,
@@ -90,16 +95,21 @@ library
                       TLS.Random,
                       TLS.Records.ContentType,
                       TLS.Session,
+                      Tor.Circuit,
                       Tor.DataFormat.Consensus,
                       Tor.DataFormat.DefaultDirectory,
                       Tor.DataFormat.DirCertInfo,
                       Tor.DataFormat.Helpers,
+                      Tor.DataFormat.RelayCell,
                       Tor.DataFormat.RouterDesc,
+                      Tor.DataFormat.TorAddress,
                       Tor.DataFormat.TorCell,
+                      Tor.HybridCrypto,
                       Tor.Link,
                       Tor.NetworkStack.Fetch,
                       Tor.NetworkStack.System,
                       Tor.NetworkStack,
+                      Tor.Options,
                       Tor.RouterDesc.Render,
                       Tor.RouterDesc,
                       Tor.State.Credentials,
@@ -113,7 +123,12 @@ executable haskell-tor
   default-language:   Haskell2010
   ghc-options:        -Wall
   build-depends:
+                      asn1-encoding              >= 0.8   && < 0.10,
+                      asn1-types                 >= 0.2   && < 0.4,
                       base                       >= 4.7   && < 5.0,
+                      base64-bytestring          >= 1.0   && < 1.2,
+                      bytestring                 >= 0.10  && < 0.11,
+                      crypto-pubkey-types        >= 0.4   && < 0.6,
                       haskell-tor                >= 0.1   && < 0.3,
                       network                    >= 2.5   && < 2.7,
                       old-locale                 >= 1.0   && < 1.2,
@@ -136,8 +151,8 @@ test-suite test-tor
                       haskell-tor                >= 0.1   && < 0.3,
                       HUnit                      >= 1.2   && < 1.4,
                       QuickCheck                 >= 2.7   && < 2.9,
-                      RSA                        >= 2.0.0 && < 2.2,
-                      SHA                        >= 1.6   && < 1.8,
+                      RSA                        >= 2.1.0 && < 2.2,
+                      SHA                        >= 2     && < 2.2,
                       tagged                     >= 0.7   && < 0.9,
                       test-framework             >= 0.8   && < 0.10,
                       test-framework-hunit       >= 0.3   && < 0.5,

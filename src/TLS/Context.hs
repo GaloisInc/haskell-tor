@@ -75,33 +75,21 @@ data IOSystem = IOSystem {
 
 type RNG = GenAutoReseed CtrDRBG HashDRBG
 
-newtype TLSContext = TLS (MVar TLSState)
-
-data TLSState = TLSState {
+data TLSContext = TLSContext {
     readBS             :: Int -> IO ByteString
   , writeBS            :: ByteString -> IO ()
   , flushChannel       :: IO ()
-  , randomGen          :: RNG
-    --
-  , incomingCompressor :: Compressor
-  , outgoingCompressor :: Compressor
-  , incomingEncryptor  :: Encryptor
-  , outgoingEncryptor  :: Encryptor
-  , pendingCipherSuite :: (Compressor, Encryptor)
-    --
-  , clientRandom       :: ByteString
-  , serverRandom       :: ByteString
-  , masterSecret       :: ByteString
-  , serverCerts        :: [SignedCertificate]
-    --
   , curVersion         :: ProtocolVersion
-  , savedRecords       :: [Record]
     --
-  , amRecording        :: Bool
-  , recording          :: ByteString
+  , incomingTools      :: MVar ([Record], Compressor, Encryptor, Word64)
+  , outgoingTools      :: MVar (RNG,      Compressor, Encryptor, Word64)
+  , recordingInfo      :: MVar (Bool, ByteString)
     --
-  , incomingSeq        :: Word64
-  , outgoingSeq        :: Word64
+  , pendingCipherSuite :: MVar (Compressor, Encryptor)
+  , clientRandom       :: MVar ByteString
+  , serverRandom       :: MVar ByteString
+  , masterSecret       :: MVar ByteString
+  , serverCerts        :: MVar [SignedCertificate]
   }
 
 -- ----------------------------------------------------------------------------
@@ -111,79 +99,73 @@ initialContext iosys =
   do let taggedSeedLen = genSeedLength :: Tagged RNG ByteLength
          seedLen       = unTagged taggedSeedLen
      seed <- getEntropy seedLen
-     case newGen seed of
-       Left  err -> throwIO err
-       Right g   -> TLS <$> newMVar (initialState g)
+     let g = throwLeft (newGen seed)
+     itMV <- newMVar ([], getCompressor nullCompression, nullEncryptor, 0)
+     otMV <- newMVar (g,  getCompressor nullCompression, nullEncryptor, 0)
+     riMV <- newMVar (False, error "Touched recording before start.")
+     pnMV <- newMVar (error "No pending compressor",
+                      error "No pending encryptor")
+     crMV <- newMVar BS.empty
+     srMV <- newMVar BS.empty
+     msMV <- newMVar BS.empty
+     scMV <- newMVar []
+     return TLSContext {
+       readBS = ioRead iosys
+     , writeBS = ioWrite iosys
+     , flushChannel = ioFlush iosys
+     , curVersion = versionTLS1_2
+     , incomingTools = itMV
+     , outgoingTools = otMV
+     , recordingInfo = riMV
+     , pendingCipherSuite = pnMV
+     , clientRandom = crMV
+     , serverRandom = srMV
+     , masterSecret = msMV
+     , serverCerts = scMV
+     }
  where
-  initialState g = TLSState {
-    readBS             = ioRead iosys
-  , writeBS            = ioWrite iosys
-  , flushChannel       = ioFlush iosys
-  , randomGen          = g
-  , incomingCompressor = getCompressor nullCompression
-  , outgoingCompressor = getCompressor nullCompression
-  , incomingEncryptor  = nullEncryptor
-  , outgoingEncryptor  = nullEncryptor
-  , clientRandom       = BS.empty
-  , serverRandom       = BS.empty
-  , masterSecret       = BS.empty
-  , serverCerts        = []
-  , pendingCipherSuite = (error "No pending compressor set!",
-                          error "No pending encryptor set!")
-  , curVersion         = versionTLS1_2
-  , savedRecords       = []
-  , recording          = error "touched recording before starting?"
-  , amRecording        = False
-  , incomingSeq        = 0
-  , outgoingSeq        = 0
-  }
   nullEncryptor = buildStreamEncryptor nullHash NullKey BS.empty BS.empty
                                        BS.empty BS.empty BS.empty BS.empty
 
 -- ----------------------------------------------------------------------------
 
 startRecording :: TLSContext -> IO ()
-startRecording (TLS cMV) =
-  do c <- takeMVar cMV
-     putMVar cMV $! c{ amRecording = True, recording = BS.empty }
+startRecording c = modifyMVar_ (recordingInfo c) (constM (True, BS.empty))
 
 emitRecording :: TLSContext -> IO ByteString
-emitRecording (TLS cMV) = recording <$> readMVar cMV
+emitRecording c = snd <$> readMVar (recordingInfo c)
 
 endRecording :: TLSContext -> IO ()
-endRecording (TLS cMV) =
-  do c <- takeMVar cMV
-     putMVar cMV $! c{amRecording = False, recording = error "not recording!"}
+endRecording c =
+  modifyMVar_ (recordingInfo c) (constM (False, error "not recording!"))
 
 setNextCipherSuite :: TLSContext -> Compressor -> Encryptor -> IO ()
-setNextCipherSuite (TLS cMV) comp enc =
-  do c <- takeMVar cMV
-     putMVar cMV $! c{ pendingCipherSuite = (comp, enc) }
+setNextCipherSuite c comp enc =
+  modifyMVar_ (pendingCipherSuite c) $ constM (comp, enc)
 
 -- ----------------------------------------------------------------------------
 
 nextRecord :: TLSContext -> IO Record
-nextRecord (TLS cMV) =
-  do c <- takeMVar cMV
-     (c', rec) <- forceNext c
-     putMVar cMV c'
-     return rec
- where
-  forceNext c =
-    case savedRecords c of
-      []       -> forceNext =<< getFreshRecords c
-      (r:rest) -> return (c{ savedRecords = rest }, r)
+nextRecord c =
+  do it <- takeMVar (incomingTools c)
+     case it of
+       ([], cm, en, sq) ->
+        do (f, it') <- getFreshRecords c cm en sq
+           putMVar (incomingTools c) it'
+           return f
+       ((f:rest), cm, en, sq) ->
+         do putMVar (incomingTools c) (rest, cm, en, sq)
+            return f
 
 nextHandshakeRecord :: IsHandshake a b =>
                        TLSContext -> b ->
                        IO a
-nextHandshakeRecord tls@(TLS cMV) ctxt =
-  do rec <- nextRecord tls
+nextHandshakeRecord c ctxt =
+  do rec <- nextRecord c
      case rec of
        RecordChangeCipher _ ->
-         do c <- takeMVar cMV
-            putMVar cMV $! flipIncomingCipherSuite c
-            nextHandshakeRecord tls ctxt
+         do flipIncomingCipherSuite c
+            nextHandshakeRecord c ctxt
        RecordAppData _ ->
          throwIO TLSNotHandshake
        RecordAlert a ->
@@ -191,8 +173,8 @@ nextHandshakeRecord tls@(TLS cMV) ctxt =
        RecordHandshake raw ->
          case decodeHandshake ctxt raw of
            Left err ->
-             do c <- takeMVar cMV
-                putMVar cMV $! c{ savedRecords = savedRecords c ++ [rec] }
+             do (rs, cm, en, sq) <- takeMVar (incomingTools c)
+                putMVar (incomingTools c) (rec : rs, cm, en, sq)
                 throwIO (TLSRecordError err)
            Right x ->
              return x
@@ -205,12 +187,11 @@ maybeGetHandshake tls ctxt =
         (\ (_ :: SomeException) -> return Nothing)
 
 receiveChangeCipherSpec :: TLSContext -> IO ()
-receiveChangeCipherSpec tls@(TLS cMV) =
-  do rec <- nextRecord tls
+receiveChangeCipherSpec c =
+  do rec <- nextRecord c
      case rec of
        RecordChangeCipher _ ->
-         do c <- takeMVar cMV
-            putMVar cMV $! flipIncomingCipherSuite c
+         flipIncomingCipherSuite c
        RecordAppData _ ->
          throw TLSNotChangeCipher
        RecordAlert a ->
@@ -219,13 +200,12 @@ receiveChangeCipherSpec tls@(TLS cMV) =
          throw TLSNotChangeCipher
 
 readTLS :: TLSContext -> IO ByteString
-readTLS tls@(TLS cMV) =
-  do rec <- nextRecord tls
+readTLS c =
+  do rec <- nextRecord c
      case rec of
        RecordChangeCipher _ ->
-         do c <- takeMVar cMV
-            putMVar cMV $! flipIncomingCipherSuite c
-            readTLS tls
+         do flipIncomingCipherSuite c
+            readTLS c
        RecordAppData bstr ->
          return bstr
        RecordAlert a ->
@@ -236,30 +216,27 @@ readTLS tls@(TLS cMV) =
 -- ----------------------------------------------------------------------------
 
 writeRecord :: TLSContext -> Record -> IO ()
-writeRecord (TLS cMV) r =
-  do c <- takeMVar cMV
-     let recordBS     = runPut (putRecord r)
-         recording'   = if amRecording c && isHandshake r
-                          then recording c `BS.append` recordBS
-                          else recording c
-         plains       = fragmentMessage recordBS
-         (comps, oc') = compressRecords (outgoingCompressor c) plains
-         recType      = recordType r
-     (encs, oe', g', n') <- encryptRecords (outgoingEncryptor c)
-                                           (randomGen c)
-                                           (outgoingSeq c)
-                                           recType
-                                           (curVersion c)
-                                           comps
-     let rawmsgs = map (encodeCipher recType (curVersion c)) encs
-     writeBS c (BS.concat rawmsgs)
+writeRecord c r =
+  do (g, ocomp, oenc, seqNum) <- takeMVar (outgoingTools c)
+     let recordBS        = runPut (putRecord r)
+         plains          = fragmentMessage recordBS
+         (comps, ocomp') = compressRecords ocomp plains
+         rType           = recordType r
+         ver             = curVersion c
+     (encs, oenc', g', seqNum') <- encryptRecords oenc g seqNum rType ver comps
+     let rawmsgs = map (encodeCipher rType ver) encs
+     modifyMVar_ (recordingInfo c) $ \ x ->
+       case x of
+         (True, bstr)
+           | isHandshake r -> return (True, bstr `BS.append` recordBS)
+           | otherwise     -> return x
+         _            -> return x
+     forM_ rawmsgs (writeBS c)
      flushChannel c
-     let c' = if recType == TypeChangeCipherSpec
-                then flipOutgoingCipherSuite c
-                else c{ outgoingCompressor = oc'
-                      , outgoingEncryptor  = oe'
-                      , outgoingSeq        = n' }
-     putMVar cMV $! c'{ randomGen = g', recording = recording' }
+     if rType == TypeChangeCipherSpec
+        then do (ocomp'', oenc'') <- readMVar (pendingCipherSuite c)
+                putMVar (outgoingTools c) (g', ocomp'', oenc'', 0)
+        else putMVar (outgoingTools c) (g', ocomp', oenc', seqNum')
 
 fragmentMessage :: ByteString -> [ByteString]
 fragmentMessage bstr
@@ -312,61 +289,62 @@ writeTLS c bstr = writeRecord c (RecordAppData bstr)
 -- ----------------------------------------------------------------------------
 
 setTLSSecrets :: TLSContext -> Random -> Random -> ByteString -> IO ()
-setTLSSecrets (TLS c) cr sr ms =
-  do s <- takeMVar c
-     putMVar c $ s{ clientRandom = runPut (putRandom cr)
-                  , serverRandom = runPut (putRandom sr)
-                  , masterSecret = ms }
+setTLSSecrets c cr sr ms =
+  do modifyMVar_ (clientRandom c) (constM (runPut (putRandom cr)))
+     modifyMVar_ (serverRandom c) (constM (runPut (putRandom sr)))
+     modifyMVar_ (masterSecret c) (constM ms)
 
 setServerCertificates :: TLSContext -> Maybe [ASN1Cert] -> IO ()
-setServerCertificates (TLS c) mcerts =
-  do s <- takeMVar c
-     case mcerts of
-       Nothing -> putMVar c $ s{ serverCerts = [] }
-       Just xs -> putMVar c $ s{ serverCerts = map unASN1Cert xs }
+setServerCertificates c mcerts =
+  case mcerts of
+    Nothing -> modifyMVar_ (serverCerts c) (constM [])
+    Just xs -> modifyMVar_ (serverCerts c) (constM (map unASN1Cert xs))
  where unASN1Cert (ASN1Cert x) = x
 
 getClientRandom :: TLSContext -> IO ByteString
-getClientRandom (TLS c) = clientRandom <$> readMVar c
+getClientRandom = readMVar . clientRandom
 
 getServerRandom :: TLSContext -> IO ByteString
-getServerRandom (TLS c) = serverRandom <$> readMVar c
+getServerRandom = readMVar . serverRandom
 
 getMasterSecret :: TLSContext -> IO ByteString
-getMasterSecret (TLS c) = masterSecret <$> readMVar c
+getMasterSecret = readMVar . masterSecret
 
 getServerCertificates :: TLSContext -> IO [SignedCertificate]
-getServerCertificates (TLS c) = serverCerts <$> readMVar c
+getServerCertificates = readMVar . serverCerts
 
 -- ----------------------------------------------------------------------------
 
-flipIncomingCipherSuite :: TLSState -> TLSState
-flipIncomingCipherSuite c@TLSState{ pendingCipherSuite = (comp, enc) } =
-  c{ incomingCompressor = comp, incomingEncryptor = enc, incomingSeq = 0 }
-
-flipOutgoingCipherSuite :: TLSState -> TLSState
-flipOutgoingCipherSuite c@TLSState{ pendingCipherSuite = (comp, enc) } =
-  c{ outgoingCompressor = comp, outgoingEncryptor = enc, outgoingSeq = 0 }
+flipIncomingCipherSuite :: TLSContext -> IO ()
+flipIncomingCipherSuite c =
+  do (rs, _, _, _) <- takeMVar (incomingTools c)
+     (cm, en)      <- readMVar (pendingCipherSuite c)
+     putMVar (incomingTools c) (rs, cm, en, 0)
 
 -- ----------------------------------------------------------------------------
 
-getFreshRecords :: TLSState -> IO TLSState
-getFreshRecords c =
+getFreshRecords :: TLSContext -> Compressor -> Encryptor -> Word64 ->
+                   IO (Record, ([Record], Compressor, Encryptor, Word64))
+getFreshRecords c icomp ienc seqNum =
   do (conType, pver, len) <- runGet readHeader <$> readBS c (1 + 2 + 2)
      when (len > 18432) $ throw TLSCiphertextTooLong -- 18432 == 2^14 + 2048
      pkt <- readBS c (fromIntegral len)
-     case runDecrypt (incomingEncryptor c) (incomingSeq c) conType pver pkt of
+     case runDecrypt ienc seqNum conType pver pkt of
        Left err ->
          throw (TLSEncodeDecodeError err)
-       Right (compr, e') ->
-         do let (ptext, c') = runDecompress (incomingCompressor c) compr
-            records <- readRecords (typeParser conType) ptext
-            let newRecord = recording c `BS.append` ptext
-                shouldRecord = amRecording c && (conType == TypeHandshake)
-                recording' = if shouldRecord then newRecord else recording c
-            return c{ incomingEncryptor = e', incomingCompressor = c'
-                    , incomingSeq = incomingSeq c + 1, recording = recording'
-                    , savedRecords = savedRecords c ++ records }
+       Right (compr, ienc') ->
+         do let (ptext, icomp') = runDecompress icomp compr
+            (frec:rrecs) <- readRecords (typeParser conType) ptext
+            let seqNum' = seqNum + 1
+            modifyMVar_ (recordingInfo c) $ \ x ->
+              case x of
+                (True, bstr)
+                  | conType == TypeHandshake ->
+                      return (True, bstr `BS.append` ptext)
+                  | otherwise ->
+                      return x
+                _            -> return x
+            return (frec, (rrecs, icomp', ienc', seqNum'))
 
 readRecords :: Get Record -> ByteString -> IO [Record]
 readRecords getter bstr
@@ -413,3 +391,5 @@ isHandshake :: Record -> Bool
 isHandshake (RecordHandshake _) = True
 isHandshake _                   = False
 
+constM :: a -> b -> IO a
+constM x _ = return x

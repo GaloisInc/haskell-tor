@@ -4,7 +4,6 @@ module Tor.RouterDesc.Render(
  where
 
 import Codec.Crypto.RSA
-import Crypto.Types.PubKey.RSA
 import Control.Monad
 import Data.Bits
 import Data.ByteString.Base64.Lazy
@@ -92,7 +91,7 @@ renderRouterDesc' r k =
                                     putWord "router-signature"
                                     endLine
      let descbstr = BSC.pack desc
-         hashSHA1' = HashInfo BS.empty (bytestringDigest . sha1)
+         hashSHA1' = HashInfo BS.empty sha1
          signature = rsassa_pkcs1_v1_5_sign hashSHA1' k descbstr
          encodedsig = encode signature
      put desc

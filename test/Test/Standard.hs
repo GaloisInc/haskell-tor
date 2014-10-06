@@ -6,6 +6,7 @@ import Crypto.Random.DRBG
 import Data.Binary.Get
 import Data.Binary.Put
 import Data.ByteString(pack)
+import qualified Data.ByteString.Lazy as BS
 import Data.Tagged
 import Test.QuickCheck
 
@@ -17,6 +18,9 @@ arbitraryRNG =
      case newGen bstr of
        Left e  -> fail ("Couldn't generate arbitrary HashDRBG: " ++ show e)
        Right g -> return g
+
+arbitraryBS :: Int -> Gen BS.ByteString
+arbitraryBS x = BS.pack <$> replicateM x arbitrary
 
 serialProp :: Eq a => Get a -> (a -> Put) -> a -> Bool
 serialProp getter putter x =

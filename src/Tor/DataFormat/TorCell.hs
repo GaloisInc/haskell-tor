@@ -1,11 +1,8 @@
 module Tor.DataFormat.TorCell(
          TorCell(..),       putTorCell,       getTorCell
-       , RelayCommand(..),  putRelayCommand,  getRelayCommand
        , DestroyReason(..), putDestroyReason, getDestroyReason
-       , TorAddress(..),    putTorAddress,    getTorAddress
        , HandshakeType(..), putHandshakeType, getHandshakeType
        , TorCert(..),       putTorCert,       getTorCert
-       , unTorAddress
        )
  where
 
@@ -13,24 +10,21 @@ import Control.Applicative
 import Control.Monad
 import Data.Binary.Get
 import Data.Binary.Put
-import Data.Bits
 import Data.ByteString.Lazy(ByteString)
-import Data.ByteString.Lazy.Char8(pack,unpack)
 import qualified Data.ByteString.Lazy as BS
-import Data.List(intercalate)
 import Data.X509
 import Data.Word
-import Numeric
+import Tor.DataFormat.TorAddress
 
 data TorCell = Padding
              | Create      Word32 ByteString
              | Created     Word32 ByteString
-             | Relay       Word32 RelayCommand Word16 Word16 Word32 ByteString
+             | Relay       Word32 ByteString
              | Destroy     Word32 DestroyReason
              | CreateFast  Word32 ByteString
              | CreatedFast Word32 ByteString ByteString
              | NetInfo            Word32 TorAddress [TorAddress]
-             | RelayEarly  Word32
+             | RelayEarly  Word32 ByteString
              | Create2     Word32 HandshakeType ByteString
              | Created2    Word32 ByteString
              | Versions
@@ -46,34 +40,33 @@ getTorCell =
   do circuit <- getWord32be
      command <- getWord8
      case command of
-       0   -> return Padding
-       1   -> Create circuit <$> getLazyByteString (128 + 16 + 42)
-       2   -> Created circuit <$> getLazyByteString (128 + 20)
-       3   -> do cmd <- getRelayCommand
-                 rec <- getWord16be
-                 str <- getWord16be
-                 dig <- getWord32be
-                 len <- getWord16be
-                 pay <- getLazyByteString (509 - 11)
-                 let pay' = BS.take (fromIntegral len) pay
-                 return (Relay circuit cmd rec str dig pay')
-       4   -> Destroy circuit <$> getDestroyReason
-       5   -> CreateFast circuit <$> getLazyByteString 20
-       6   -> CreatedFast circuit <$> getLazyByteString 20
-                                  <*> getLazyByteString 20
-       8   -> do tstamp   <- getWord32be
-                 otherOR  <- getTorAddress
-                 numAddrs <- getWord8
-                 thisOR   <- replicateM (fromIntegral numAddrs) getTorAddress
-                 return (NetInfo tstamp otherOR thisOR)
-       9   -> return (RelayEarly circuit)
-       10  -> do htype <- getHandshakeType
-                 hlen  <- getWord16be
-                 hdata <- getLazyByteString (fromIntegral hlen)
-                 return (Create2 circuit htype hdata)
-       11  -> do hlen  <- getWord16be
-                 hdata <- getLazyByteString (fromIntegral hlen)
-                 return (Created2 circuit hdata)
+       0   -> getStandardCell $ return Padding
+       1   -> getStandardCell $
+                Create circuit <$> getLazyByteString (128 + 16 + 42)
+       2   -> getStandardCell $
+                Created circuit <$> getLazyByteString (128 + 20)
+       3   -> getStandardCell $ Relay circuit <$> getRemainingLazyByteString
+       4   -> getStandardCell $ Destroy circuit <$> getDestroyReason
+       5   -> getStandardCell $ CreateFast circuit <$> getLazyByteString 20
+       6   -> getStandardCell $ CreatedFast circuit <$> getLazyByteString 20
+                                                    <*> getLazyByteString 20
+       8   -> getStandardCell $
+                do tstamp   <- getWord32be
+                   otherOR  <- getTorAddress
+                   numAddrs <- getWord8
+                   thisOR   <- replicateM (fromIntegral numAddrs) getTorAddress
+                   return (NetInfo tstamp otherOR thisOR)
+       9   -> getStandardCell $
+                RelayEarly circuit <$> getRemainingLazyByteString
+       10  -> getStandardCell $
+                do htype <- getHandshakeType
+                   hlen  <- getWord16be
+                   hdata <- getLazyByteString (fromIntegral hlen)
+                   return (Create2 circuit htype hdata)
+       11  -> getStandardCell $
+                do hlen  <- getWord16be
+                   hdata <- getLazyByteString (fromIntegral hlen)
+                   return (Created2 circuit hdata)
        7   -> fail "Should not be getting versions through this interface."
        128 -> getVariableLength "VPadding"      getVPadding
        129 -> getVariableLength "Certs"         getCerts
@@ -82,13 +75,18 @@ getTorCell =
        132 -> getVariableLength "Authorize"     (return Authorize)
        _   -> fail "Improper Tor cell command."
  where
+  getStandardCell getter =
+    do bstr <- getLazyByteString 509 -- PAYLOAD_LEN
+       case runGetOrFail getter bstr of
+         Left (_, _, err) -> fail err
+         Right (_, _, x)  -> return x
   getVariableLength name getter =
     do len   <- getWord16be
        body  <- getLazyByteString (fromIntegral len)
        case runGetOrFail getter body of
          Left  (_, _, s) -> fail ("Couldn't read " ++ name ++ " body: " ++ s)
          Right (_, _, x) -> return x
-  --
+ --
   getVPadding = VPadding <$> getRemainingLazyByteString
   --
   getAuthChallenge =
@@ -105,59 +103,65 @@ getTorCell =
 
 putTorCell :: TorCell -> Put
 putTorCell Padding =
-  do putWord32be 0 -- Circuit ID
-     putWord8    0 -- PADDING
+  putStandardCell $
+     putWord32be 0 -- Circuit ID
 putTorCell (Create circ bstr) =
-  do putWord32be       circ
-     putWord8          1
-     putLazyByteString bstr
+  putStandardCell $
+    do putWord32be       circ
+       putWord8          1
+       putLazyByteString bstr
 putTorCell (Created circ bstr) =
-  do putWord32be       circ
-     putWord8          2
-     putLazyByteString bstr
-putTorCell (Relay circ cmd rec sid dig rdata) =
-  do putWord32be       circ
-     putWord8          3
-     putRelayCommand   cmd
-     putWord16be       rec
-     putWord16be       sid
-     putWord32be       dig
-     putWord16be       (fromIntegral (BS.length rdata) + 11)
-     putLazyByteString rdata
+  putStandardCell $
+    do putWord32be       circ
+       putWord8          2
+       putLazyByteString bstr
+putTorCell (Relay circ bstr) =
+  putStandardCell $
+    do putWord32be       circ
+       putWord8          3
+       putLazyByteString bstr
 putTorCell (Destroy circ dreason) =
-  do putWord32be       circ
-     putWord8          4
-     putDestroyReason  dreason
+  putStandardCell $
+    do putWord32be       circ
+       putWord8          4
+       putDestroyReason  dreason
 putTorCell (CreateFast circ keymat) =
-  do putWord32be       circ
-     putWord8          5
-     putLazyByteString keymat
+  putStandardCell $
+    do putWord32be       circ
+       putWord8          5
+       putLazyByteString keymat
 putTorCell (CreatedFast circ keymat deriv) =
-  do putWord32be       circ
-     putWord8          6
-     putLazyByteString keymat
-     putLazyByteString deriv
+  putStandardCell $
+    do putWord32be       circ
+       putWord8          6
+       putLazyByteString keymat
+       putLazyByteString deriv
 putTorCell (NetInfo ttl oneside others) =
-  do putWord32be       0
-     putWord8          8
-     putWord32be       ttl
-     putTorAddress     oneside
-     putWord8          (fromIntegral (length others))
-     forM_ others putTorAddress
-putTorCell (RelayEarly circ) =
-  do putWord32be       circ
-     putWord8          9
+  putStandardCell $
+    do putWord32be       0
+       putWord8          8
+       putWord32be       ttl
+       putTorAddress     oneside
+       putWord8          (fromIntegral (length others))
+       forM_ others putTorAddress
+putTorCell (RelayEarly circ bstr) =
+  putStandardCell $
+    do putWord32be       circ
+       putWord8          9
+       putLazyByteString bstr
 putTorCell (Create2 circ htype cdata) =
-  do putWord32be       circ
-     putWord8          10
-     putHandshakeType  htype
-     putWord16be       (fromIntegral (BS.length cdata))
-     putLazyByteString cdata
+  putStandardCell $
+    do putWord32be       circ
+       putWord8          10
+       putHandshakeType  htype
+       putWord16be       (fromIntegral (BS.length cdata))
+       putLazyByteString cdata
 putTorCell (Created2 circ cdata) =
-  do putWord32be       circ
-     putWord8          11
-     putWord16be       (fromIntegral (BS.length cdata))
-     putLazyByteString cdata
+  putStandardCell $
+    do putWord32be       circ
+       putWord8          11
+       putWord16be       (fromIntegral (BS.length cdata))
+       putLazyByteString cdata
 putTorCell (VPadding bstr) =
   do putWord32be       0
      putWord8          128
@@ -199,91 +203,11 @@ putLenByteString m =
      putWord16be (fromIntegral (BS.length bstr))
      putLazyByteString bstr
 
--- -----------------------------------------------------------------------------
-
-data RelayCommand = RelayBegin
-                  | RelayData
-                  | RelayEnd
-                  | RelayConnected
-                  | RelaySendMe
-                  | RelayExtend
-                  | RelayExtended
-                  | RelayTruncate
-                  | RelayTruncated
-                  | RelayDrop
-                  | RelayResolve
-                  | RelayResolved
-                  | RelayBeginDir
-                  | RelayExtend2
-                  | RelayExtended2
-                  | RelayEstablishIntro
-                  | RelayEstablishRendezvous
-                  | RelayIntroduce1
-                  | RelayIntroduce2
-                  | RelayRendezvous1
-                  | RelayRendezvous2
-                  | RelayIntroEstablished
-                  | RelayRendezvousEstablished
-                  | RelayIntroducedAck
-                  | RelayCommandUnknown Word8
- deriving (Eq, Show)
-
-getRelayCommand :: Get RelayCommand
-getRelayCommand =
-  do b <- getWord8
-     case b of
-       1  -> return RelayBegin
-       2  -> return RelayData
-       3  -> return RelayEnd
-       4  -> return RelayConnected
-       5  -> return RelaySendMe
-       6  -> return RelayExtend
-       7  -> return RelayExtended
-       8  -> return RelayTruncate
-       9  -> return RelayTruncated
-       10 -> return RelayDrop
-       11 -> return RelayResolve
-       12 -> return RelayResolved
-       13 -> return RelayBeginDir
-       14 -> return RelayExtend2
-       15 -> return RelayExtended2
-       32 -> return RelayEstablishIntro
-       33 -> return RelayEstablishRendezvous
-       34 -> return RelayIntroduce1
-       35 -> return RelayIntroduce2
-       36 -> return RelayRendezvous1
-       37 -> return RelayRendezvous2
-       38 -> return RelayIntroEstablished
-       39 -> return RelayRendezvousEstablished
-       40 -> return RelayIntroducedAck
-       _  -> return (RelayCommandUnknown b)
-
-putRelayCommand :: RelayCommand -> Put
-putRelayCommand RelayBegin                  = putWord8 1
-putRelayCommand RelayData                   = putWord8 2
-putRelayCommand RelayEnd                    = putWord8 3
-putRelayCommand RelayConnected              = putWord8 4
-putRelayCommand RelaySendMe                 = putWord8 5
-putRelayCommand RelayExtend                 = putWord8 6
-putRelayCommand RelayExtended               = putWord8 7
-putRelayCommand RelayTruncate               = putWord8 8
-putRelayCommand RelayTruncated              = putWord8 9
-putRelayCommand RelayDrop                   = putWord8 10
-putRelayCommand RelayResolve                = putWord8 11
-putRelayCommand RelayResolved               = putWord8 12
-putRelayCommand RelayBeginDir               = putWord8 13
-putRelayCommand RelayExtend2                = putWord8 14
-putRelayCommand RelayExtended2              = putWord8 15
-putRelayCommand RelayEstablishIntro         = putWord8 32
-putRelayCommand RelayEstablishRendezvous    = putWord8 33
-putRelayCommand RelayIntroduce1             = putWord8 34
-putRelayCommand RelayIntroduce2             = putWord8 35
-putRelayCommand RelayRendezvous1            = putWord8 36
-putRelayCommand RelayRendezvous2            = putWord8 37
-putRelayCommand RelayIntroEstablished       = putWord8 38
-putRelayCommand RelayRendezvousEstablished  = putWord8 39
-putRelayCommand RelayIntroducedAck          = putWord8 40
-putRelayCommand (RelayCommandUnknown x)     = putWord8 x
+putStandardCell :: Put -> Put
+putStandardCell m =
+  do let bstr = runPut m
+         infstr = bstr `BS.append` BS.repeat 0
+     putLazyByteString (BS.take 514 infstr)
 
 -- -----------------------------------------------------------------------------
 
@@ -337,81 +261,6 @@ putDestroyReason CircuitConstructionTimeout = putWord8 10
 putDestroyReason CircuitDestroyed           = putWord8 11
 putDestroyReason NoSuchService              = putWord8 12
 putDestroyReason (UnknownDestroyReason x)   = putWord8 x
-
--- -----------------------------------------------------------------------------
-
-data TorAddress = Hostname String
-                | IP4 String
-                | IP6 String
-                | TransientError String
-                | NontransientError String
- deriving (Eq, Show)
-
-unTorAddress :: TorAddress -> String
-unTorAddress (Hostname s) = s
-unTorAddress (IP4 s) = s
-unTorAddress (IP6 s) = s
-unTorAddress _       = error "unTorAddress: invalid input."
-
-getTorAddress :: Get TorAddress
-getTorAddress =
-  do atype <- getWord8
-     len   <- getWord8
-     value <- getLazyByteString (fromIntegral len)
-     case (atype, len) of
-       (0x00, _)  -> return (Hostname (unpack value))
-       (0x04, 4)  -> return (IP4 (ip4ToString value))
-       (0x04, _)  -> return (TransientError "Bad length for IP4 address.")
-       (0x06, 16) -> return (IP6 (ip6ToString value))
-       (0x06, _)  -> return (TransientError "Bad length for IP6 address.")
-       (0xF0, _)  -> return (TransientError "External transient error.")
-       (0xF1, _)  -> return (NontransientError "External nontransient error.")
-       (_,    _)  -> return (NontransientError ("Unknown address type: " ++ show atype))
-
-ip4ToString :: ByteString -> String
-ip4ToString bstr = intercalate "." (map show (BS.unpack bstr))
-
-ip6ToString :: ByteString -> String
-ip6ToString bstr = intercalate ":" (run (BS.unpack bstr))
- where
-  run :: [Word8] -> [String]
-  run []         = []
-  run [_]        = ["ERROR"]
-  run (a:b:rest) =
-    let a' = fromIntegral a :: Word16
-        b' = fromIntegral b :: Word16
-        v  = (a' `shiftL` 8) .|. b'
-    in (showHex v "" : run rest)
-
-putTorAddress :: TorAddress -> Put
-putTorAddress (Hostname str) =
-  do putWord8 0x00
-     let bstr = pack str
-     putWord8 (fromIntegral (BS.length bstr))
-     putLazyByteString bstr
-putTorAddress (IP4 str) =
-  do putWord8 0x04
-     putWord8 4
-     forM_ (unintercalate '.' str) (putWord8 . read)
-putTorAddress (IP6 str) =
-  do putWord8 0x06
-     putWord8 16
-     forM_ (unintercalate ':' str) $ \ v ->
-       case readHex v of
-        []        -> fail "Couldn't read IP6 address component."
-        ((x,_):_) -> putWord16be x
-putTorAddress (TransientError _) =
-  do putWord8 0xF0
-     putWord8 0
-putTorAddress (NontransientError _) =
-  do putWord8 0xF1
-     putWord8 0
-
-unintercalate :: Char -> String -> [String]
-unintercalate _ "" = []
-unintercalate c str =
-  let (first, rest) = span (/= c) str
-  in first : (unintercalate c (drop 1 rest))
 
 -- -----------------------------------------------------------------------------
 
@@ -476,3 +325,4 @@ getCerts =
   do num   <- getWord8
      certs <- replicateM (fromIntegral num) getTorCert
      return (Certs certs)
+

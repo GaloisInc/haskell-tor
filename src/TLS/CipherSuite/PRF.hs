@@ -3,10 +3,10 @@ module TLS.CipherSuite.PRF(prf) where
 import Data.ByteString.Lazy(ByteString)
 import qualified Data.ByteString.Lazy as BS
 import Data.ByteString.Lazy.Char8(pack)
-import TLS.CipherSuite.HMAC
+import Data.Digest.Pure.SHA.HMAC
 
 prf :: ByteString -> String -> ByteString -> ByteString
-prf secret label seed = p_hash hmac_sha256 secret (label' `BS.append` seed)
+prf secret label seed = p_hash hmacSha256 secret (label' `BS.append` seed)
  where label' = pack label
 
 p_hash :: (ByteString -> ByteString -> ByteString) ->

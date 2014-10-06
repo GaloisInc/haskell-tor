@@ -39,9 +39,9 @@ parseDirectoryCertInfo bstr =
            Right True ->
              Right res
  where
-  digest = bytestringDigest (generateHash bstr)
+  digest = generateHash bstr
 
-generateHash :: ByteString -> Digest SHA1State
+generateHash :: ByteString -> ByteString
 generateHash infile = sha1 (run infile)
  where
   run bstr =
@@ -65,7 +65,7 @@ dirCertInfo =
      idsig                   <- signature
      _                       <- string "dir-key-certification\n"
      dcKeyCertification      <- signature
-     let digest = bytestringDigest (sha1 idbstr)
+     let digest = sha1 idbstr
      case rsassa_pkcs1_v1_5_verify hashEmpty dcSigningKey digest idsig of
         Left err ->
           fail ("RSA ID key verification failed: " ++ show err)

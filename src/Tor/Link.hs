@@ -1,29 +1,40 @@
+{-# LANGUAGE MultiWayIf #-}
 module Tor.Link(
          TorLink
-       , getNextCell
        , initializeClientTorLink
+       , newRandomCircuit
+       , modifyCircuitHandler
+       , endCircuit
+       , writeCell
        )
  where
 
 import Codec.Crypto.RSA
 import Control.Applicative
-import Control.Concurrent.MVar
+import Control.Concurrent
+import Control.Concurrent.STM
 import Control.Exception
 import Control.Monad
 import Crypto.Random
-import Crypto.Types.PubKey.RSA
 import Data.Binary.Get
 import Data.Binary.Put
-import Data.ByteString.Lazy(ByteString,toChunks,fromChunks)
+import Data.Bits
+import Data.ByteString.Lazy(ByteString,toChunks)
+import qualified Data.ByteString as SBS
 import qualified Data.ByteString.Lazy as BS
 import Data.ByteString.Lazy.Char8(pack)
 import Data.Digest.Pure.SHA
+import Data.Digest.Pure.SHA.HMAC
+import Data.Map.Strict(Map)
+import qualified Data.Map.Strict as Map
 import Data.Time.Clock
 import Data.Time.Clock.POSIX
 import Data.Word
 import Data.X509
+import Tor.DataFormat.TorAddress
 import Tor.DataFormat.TorCell
 import Tor.NetworkStack
+import Tor.RouterDesc
 import Tor.State
 import Tor.State.Credentials
 import TLS.Certificate
@@ -32,22 +43,59 @@ import TLS.CompressionMethod
 import TLS.Context
 import TLS.Negotiation
 
+type CircuitHandler = TorCell -> IO ()
+
+-- -----------------------------------------------------------------------------
+
 data TorLink = TorLink {
-       linkContext     :: TLSContext
-     , linkInputBuffer :: MVar ByteString
+       linkContext           :: TLSContext
+     , linkInitiatedRemotely :: Bool
+     , linkHandlerTable      :: TVar (Map Word32 CircuitHandler)
      }
 
-initializeClientTorLink :: TorState ls s ->
-                           TorAddress -> Word16 ->
+newRandomCircuit :: CryptoRandomGen g =>
+                    TorLink -> CircuitHandler -> g ->
+                    STM (Word32, g)
+newRandomCircuit link handler g =
+  do let (bstr, g') = throwLeft (genBytes 4 g)
+         v          = runGet getWord32host (BS.fromStrict bstr)
+         -- FIXME: the below seems reverse of spec, but is what the code expects
+         v' | linkInitiatedRemotely link = clearBit v 31
+            | otherwise                  = setBit v 31
+     curTable <- readTVar (linkHandlerTable link)
+     if | v' == 0                -> newRandomCircuit link handler g'
+        | Map.member v' curTable -> newRandomCircuit link handler g'
+        | otherwise              ->
+           do let table' = Map.insert v' handler curTable
+              writeTVar (linkHandlerTable link) table'
+              return (v', g')
+
+modifyCircuitHandler :: TorLink -> Word32 -> CircuitHandler -> IO ()
+modifyCircuitHandler link circId handler =
+  atomically $ modifyTVar' (linkHandlerTable link) $ \ table ->
+    Map.insert circId handler table
+
+endCircuit :: TorLink -> Word32 -> IO ()
+endCircuit link circId =
+  atomically $ modifyTVar' (linkHandlerTable link) $ Map.delete circId
+
+-- -----------------------------------------------------------------------------
+
+-- |Create a direct link to the Tor node at the given address and port number.
+-- Either returns the link or an error generated during the attempted
+-- connection. Note that this routine performs some internal certificate
+-- checking, but you should verify that the certificate you expected from
+-- the connection is what you expected it to be.
+initializeClientTorLink :: TorState ls s -> RouterDesc ->
                            IO (Either String TorLink)
-initializeClientTorLink torst them orport =
+initializeClientTorLink torst them =
   handle (\ e -> return (Left (show (e :: SomeException)))) $
     do now <- getCurrentTime
        let ns = getNetworkStack torst
            vlen = (now, (2 * 60 * 60) `addUTCTime` now)
        (idCert, idKey) <- getSigningCredentials torst
        (authPriv, authCert) <- withRNG torst (genCertificate idKey vlen)
-       Just sock <- connect ns (unTorAddress them) orport
+       Just sock <- connect ns (routerIPv4Address them) (routerORPort them)
        tls <- clientNegotiate (toIOSystem ns sock) (clientTLSOpts authCert authPriv)
        let idCert'  = signedObject (getSigned idCert)
        -- send out our initial message
@@ -68,18 +116,78 @@ initializeClientTorLink torst them orport =
                  Nothing -> fail "RNG failure."
                  Just x  -> return x
        let signedBit = hdr `BS.append` rand
-           hash = bytestringDigest (sha256 signedBit)
+           hash = sha256 signedBit
            sig = rsassa_pkcs1_v1_5_sign (HashInfo BS.empty id) authPriv hash
            msg = signedBit `BS.append` sig
        writeTLS tls $ putCell (Authenticate msg)
        -- finally, build and send the NETINFO message
        now' <- fromEnum <$> getPOSIXTime
        us <- getLocalAddresses torst
-       writeTLS tls $ putCell $ NetInfo (fromIntegral now') them us
+       let ni = NetInfo (fromIntegral now') (IP4 (routerIPv4Address them)) us
+       writeTLS tls $ putCell ni
        -- ... and return the link pointer
-       bufMV <- newMVar left
-       logMsg torst ("Created new link to " ++ unTorAddress them)
-       return (Right (TorLink tls bufMV))
+       logMsg torst ("Created new link to " ++ routerIPv4Address them ++
+                     if null (routerNickname them) then "" else
+                      (" (" ++ show (routerNickname them) ++ ")"))
+       handlerTableTV <- newTVarIO Map.empty
+       _ <- forkIO (runLink torst tls handlerTableTV (toChunks left))
+       return (Right (TorLink tls False handlerTableTV))
+
+runLink :: TorState ls s ->
+           TLSContext -> TVar (Map Word32 CircuitHandler) ->
+           [SBS.ByteString] ->
+           IO ()
+runLink tor link handlerMapTV left =
+  do mcell <- fetchCell (runGetIncremental getTorCell) left
+     case mcell of
+       Nothing -> return ()
+       Just (cell, rest) ->
+         do processCell cell
+            runLink tor link handlerMapTV rest
+ where
+  fetchCell (Fail _ _ _)   _ = return Nothing
+  fetchCell (Partial next) [] =
+    do newbufs <- toChunks <$> readTLS link
+       fetchCell (Partial next) newbufs
+  fetchCell (Partial next) (f:rest) =
+    fetchCell (next (Just f)) rest
+  fetchCell (Done frest _ res) buf =
+    return (Just (res, frest : buf))
+  --
+  processCell   Padding                       = return ()
+  processCell   (Create _ _)                  = putStrLn "Implement incoming create!"
+  processCell x@(Created circId _)            = sendToHandler circId x
+  processCell x@(Relay circId _)              = sendToHandler circId x
+  processCell x@(Destroy circId _)            = sendToHandler circId x
+  processCell   (CreateFast _ _)              = putStrLn "Implement CreateFast"
+  processCell x@(CreatedFast circId _ _)      = sendToHandler circId x
+  processCell   (NetInfo _ _ _)               = return ()
+  processCell x@(RelayEarly circId _)         = sendToHandler circId x
+  processCell   (Create2 _ _ _)               = putStrLn "Implement Create2"
+  processCell x@(Created2 circId _)           = sendToHandler circId x
+  processCell   Versions                      = return ()
+  processCell   (VPadding _)                  = return ()
+  processCell   (Certs _)                     = return ()
+  processCell   (AuthChallenge _ _)           = return ()
+  processCell   (Authenticate _)              = return ()
+  processCell   Authorize                     = return ()
+  --
+  sendToHandler circId x =
+    do table <- readTVarIO handlerMapTV
+       case Map.lookup circId table of
+         Nothing ->
+           logMsg tor ("Cell received for unknown circuit " ++ show circId)
+         Just handler ->
+           do _ <- forkIO (handler x)
+              return ()
+
+-- |Write the given cell to the Tor link.
+writeCell :: TorLink -> TorCell -> IO ()
+writeCell link cell =
+  do let outputBS = putCell cell
+     writeTLS (linkContext link) outputBS
+
+-- -----------------------------------------------------------------------------
 
 getRespInitialMsgs :: TLSContext ->
                       IO (ByteString, ByteString,
@@ -116,6 +224,7 @@ getRespInitialMsgs tls =
            return (acc `BS.append` accchunk, leftover, a, b) 
       Partial next     ->
         do b <- readTLS tls
+           putStrLn ("read " ++ show (BS.length b) ++ " bytes")
            let getter' = next (Just (BS.toStrict b))
            getBaseCells getter' b (acc `BS.append` lastBS)
   --
@@ -202,26 +311,6 @@ getNetInfoCell =
        NetInfo _ _ _     -> return cell
        _                 -> fail "Unexpected cell in getNetInfoCell."
 
-getNextCell ::  TorLink -> IO (Maybe TorCell)
-getNextCell link =
-  do buf <- takeMVar (linkInputBuffer link)
-     let bufs = toChunks buf
-     (res, buf') <- fetchCell bufs bufs (runGetIncremental getTorCell)
-     putMVar (linkInputBuffer link) (fromChunks buf')
-     return res
- where
-  fetchCell [] total decoder =
-    do newbufs <- toChunks <$> readTLS (linkContext link)
-       fetchCell newbufs (total ++ newbufs) decoder
-  fetchCell buf@(f:rest) total decoder =
-    case decoder of
-      Fail _ _ _ ->
-        return (Nothing, total)
-      Partial next ->
-        fetchCell rest total (next (Just f))
-      Done frest _ res ->
-        return (Just res, frest : buf)
-
 authMessageHeader :: TLSContext ->
                      Certificate -> Certificate ->
                      ByteString  -> ByteString  ->
@@ -231,17 +320,16 @@ authMessageHeader tls iIdent rIdent r2i i2r rLink =
   do let atype  = pack "AUTH0001"
          cid    = keyHash sha256 iIdent
          sid    = keyHash sha256 rIdent
-         slog   = (sha256' r2i)
-         clog   = (sha256' i2r)
-         scert  = (sha256' (BS.fromStrict (encodeSignedObject rLink)))
+         slog   = sha256 r2i
+         clog   = sha256 i2r
+         scert  = sha256 (BS.fromStrict (encodeSignedObject rLink))
      clientRandom <- getClientRandom tls
      serverRandom <- getServerRandom tls
      masterSecret <- getMasterSecret tls
      let ccert      = pack "Tor V3 handshake TLS cross-certification\0"
          blob       = BS.concat [clientRandom, serverRandom, ccert]
-         tlssecrets = bytestringDigest (hmacSha256 masterSecret blob)
+         tlssecrets = hmacSha256 masterSecret blob
      return (BS.concat [atype, cid, sid, slog, clog, scert, tlssecrets])
- where sha256' = bytestringDigest . sha256
 
 genBytes' :: CryptoRandomGen g =>
              Int -> g ->

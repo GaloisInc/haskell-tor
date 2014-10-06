@@ -10,6 +10,7 @@ import Crypto.Random
 import Data.Binary
 import Data.ByteString.Lazy(ByteString)
 import qualified Data.ByteString.Lazy as BS
+import Data.Digest.Pure.SHA.HMAC
 import Data.Int
 import TLS.CipherSuite.Encryptor
 import TLS.CipherSuite.HMAC
@@ -70,7 +71,7 @@ buildStreamEncryptor hashfun fake myMACKey theirMACKey mWrite tWrite _ _=
   Encryptor StreamEncryptor{..}
  where
   lengthMAC   = BS.length (hashfun BS.empty)
-  cipherHMAC  = hmac hashfun
+  cipherHMAC  = hmac hashfun 64 -- FIXME: Hard-coding this 64 feels evil.
   (myWriteKey, theirWriteKey) = convert fake (buildStreamKey mWrite) (buildStreamKey tWrite)
   --
   convert :: TLSStreamCipher k => k -> k -> k -> (k, k)

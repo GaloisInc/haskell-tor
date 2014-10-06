@@ -70,19 +70,16 @@ data Router = Router {
      }
  deriving (Show)
 
-type SHA1Digest   = Digest SHA1State
-type SHA256Digest = Digest SHA256State
-
 parseConsensusDocument :: ByteString ->
-                          Either String (Consensus, SHA1Digest, SHA256Digest)
+                          Either String (Consensus, ByteString, ByteString)
 parseConsensusDocument bstr =
   case parse consensusDocument bstr of
     Fail _ _ err -> Left err
-    Done _ res   -> Right (res, digest1, digest256) 
+    Done _ res   -> Right (res, digest1, digest256)
  where
   (digest1, digest256) = generateHashes bstr
 
-generateHashes :: ByteString -> (SHA1Digest, SHA256Digest)
+generateHashes :: ByteString -> (ByteString, ByteString)
 generateHashes infile = (sha1 message, sha256 message)
  where
   message  = run infile
@@ -132,7 +129,7 @@ consensusDocument =
      return Consensus{..}
 
 consensusMethod :: Parser Int
-consensusMethod = decimalNum (\ x -> (x >= 1) && (x <= 17))
+consensusMethod = decimalNum (\ x -> (x >= 1) && (x <= 18))
 
 torVersion :: Parser Version
 torVersion =

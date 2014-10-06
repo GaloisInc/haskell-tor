@@ -10,7 +10,7 @@ module TLS.Certificate(
        , getDiffieHellmanPublic
        , getDiffieHellmanPrivate
        , wrapSignatureAlg
-       , keyHash
+       , keyHash, keyHash'
        , certificateHash
        , certExpired
        , isSignedBy
@@ -21,7 +21,6 @@ import Codec.Crypto.RSA.Exceptions
 import Control.Applicative
 import Control.Monad
 import Crypto.Random.DRBG
-import Crypto.Types.PubKey.RSA
 import Data.ASN1.BinaryEncoding
 import Data.ASN1.Encoding
 import Data.ASN1.OID
@@ -102,32 +101,32 @@ generateCertificate g = (ASN1Cert signedCert, PrivKeyRSA priv, g')
   certExtensions        = Extensions Nothing
 
 wrapSignatureAlg :: SignatureALG ->
-                    (ByteString -> Digest t) ->
+                    (ByteString -> ByteString) ->
                     BSS.ByteString ->
                     (BSS.ByteString, SignatureALG, ())
 wrapSignatureAlg name sha bstr =
   let inbstrL  = BS.fromChunks [bstr]
-      hashed   = bytestringDigest (sha inbstrL)
+      hashed   = sha inbstrL
       stricted = BSS.concat (BS.toChunks hashed)
   in (stricted, name, ())
 
 -- ----------------------------------------------------------------------------
 
-keyHash :: (ByteString -> Digest a) -> Certificate -> ByteString
-keyHash hash cert = bytestringDigest (hash (encodeASN1 DER asn1))
+keyHash :: (ByteString -> ByteString) -> Certificate -> ByteString
+keyHash hash cert =
+ case certPubKey cert of
+   PubKeyRSA k -> keyHash' hash k
+   _           -> error "Unknown key type in keyHash."
+
+keyHash' :: (ByteString -> ByteString) -> PublicKey -> ByteString
+keyHash' hash k = hash (encodeASN1 DER asn1)
  where
-  asn1   = case certPubKey cert of
-             PubKeyRSA k ->
-               let n = public_n k
-                   e = public_e k
-               in [Start Sequence, IntVal n, IntVal e, End Sequence]
-             _ ->
-               error "Unknown key type in keyHash."
+  asn1   = [Start Sequence, IntVal n, IntVal e, End Sequence]
+  n      = public_n k
+  e      = public_e k
 
-certificateHash :: (ByteString -> Digest a) -> Certificate -> ByteString
-certificateHash hash cert =
-  bytestringDigest (hash (encodeASN1 DER (toASN1 cert [])))
-
+certificateHash :: (ByteString -> ByteString) -> Certificate -> ByteString
+certificateHash hash cert = hash (encodeASN1 DER (toASN1 cert []))
 
 -- ----------------------------------------------------------------------------
 

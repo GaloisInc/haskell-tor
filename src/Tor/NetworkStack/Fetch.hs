@@ -12,12 +12,15 @@ import Data.Attoparsec.ByteString.Lazy
 import Data.ByteString.Lazy(ByteString)
 import qualified Data.ByteString.Lazy as BS
 import Data.ByteString.Lazy.Char8(pack)
-import Data.Digest.Pure.SHA
+import Data.Either
 import Data.Word
+import Hexdump
 import Tor.DataFormat.Consensus
 import Tor.DataFormat.DirCertInfo
 import Tor.DataFormat.Helpers
+import Tor.DataFormat.RouterDesc
 import Tor.NetworkStack
+import Tor.RouterDesc
 
 class Fetchable a where
   parseBlob :: ByteString -> Either String a
@@ -25,17 +28,24 @@ class Fetchable a where
 instance Fetchable DirectoryCertInfo where
   parseBlob = parseDirectoryCertInfo
 
-instance Fetchable (Consensus, Digest SHA1State, Digest SHA256State) where
+instance Fetchable (Consensus, ByteString, ByteString) where
   parseBlob = parseConsensusDocument
+
+instance Fetchable [RouterDesc] where
+  parseBlob bstr =
+    case partitionEithers (parseDirectory bstr) of
+      ([],    xs) -> Right xs
+      ((e:_), _)  -> Left e
 
 data FetchItem = ConsensusDocument
                | KeyCertificate
-               | Descriptors [ByteString]
+               | Descriptor ByteString
 
 instance Show FetchItem where
   show ConsensusDocument = "/tor/status-vote/current/consensus.z"
   show KeyCertificate    = "/tor/keys/authority.z"
-  show (Descriptors _)   = error "Figure out how to get descriptors"
+  show (Descriptor x)    = "/tor/server/d/" ++ (encode x) ++ ".z"
+   where encode = filter (/= ' ') . simpleHex . BS.toStrict
 
 fetch :: Fetchable a => 
          TorNetworkStack ls s ->
@@ -65,15 +75,17 @@ buildGet str = result
   crlf        = "\r\n"
 
 readResponse :: TorNetworkStack ls s -> s -> IO (Either String ByteString)
-readResponse ns sock =
-  do response <- recvAll ns sock
-     case parse httpResponse response of
-       Fail bstr _ err ->
-         do let start = show (BS.take 10 bstr)
-                msg = "Parser error: " ++ err ++ " [" ++ start ++ "]"
-            return (Left msg)
-       Done _ res ->
-         return res
+readResponse ns sock = finally getResponse (close ns sock)
+ where
+  getResponse =
+    do response <- recvAll ns sock
+       case parse httpResponse response of
+         Fail bstr _ err ->
+           do let start = show (BS.take 10 bstr)
+                  msg = "Parser error: " ++ err ++ " [" ++ start ++ "]"
+              return (Left msg)
+         Done _ res ->
+           return res
 
 httpResponse :: Parser (Either String ByteString)
 httpResponse =

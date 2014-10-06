@@ -169,7 +169,7 @@ clientNegotiate iosys tlsopt =
          compressor      = getCompressor (shCompressionMethod serverHello)
      setNextCipherSuite c compressor encryptor
      cHandshakeMessages <- emitRecording c
-     let handshakeHash = sha256' cHandshakeMessages
+     let handshakeHash = sha256 cHandshakeMessages
          cVerifyDataInf = prf masterSecret "client finished" handshakeHash
          verifyDataLen = cipherVerifyDataLength cipherSuite
          cVerifyData = BS.take verifyDataLen cVerifyDataInf
@@ -177,7 +177,7 @@ clientNegotiate iosys tlsopt =
      writeHandshake c (Finished cVerifyData)
      receiveChangeCipherSpec c
      sHandshakeMessages <- emitRecording c
-     let handshakeHash'     = sha256' sHandshakeMessages
+     let handshakeHash'     = sha256 sHandshakeMessages
          sVerifyDataInf     = prf masterSecret "server finished" handshakeHash'
          sVerifyData        = BS.take verifyDataLen sVerifyDataInf
      Finished sVerifyData' <- nextHandshakeRecord c ()
@@ -253,10 +253,6 @@ serverNegotiate iosys opts =
           let hash   = cvHashAlgorithm cv
               sigalg = cvSignatureAlgorithm cv
               sig    = cvSignature cv
-              ok = signatureValidates (cvHashAlgorithm cv)
-                                       (cvSignatureAlgorithm cv)
-                                       clientPubKey rec
-                                       (cvSignature cv)
           unless (signatureValidates hash sigalg clientPubKey rec sig) $
             fail "Certificate validation failed!"
      let masterSecretInf = prf preMaster "master secret" $ runPut $ do
@@ -276,14 +272,14 @@ serverNegotiate iosys opts =
      Finished cVerifyData' <- nextHandshakeRecord c ()
      let verifyDataLen      = cipherVerifyDataLength cipherSuite
      cHandshakeMessages <- emitRecording c
-     let cHandshakeHash     = sha256' cHandshakeMessages
+     let cHandshakeHash     = sha256 cHandshakeMessages
          cVerifyDataInf     = prf masterSecret "client finished" cHandshakeHash
          cVerifyData        = BS.take verifyDataLen cVerifyDataInf
      unless (cVerifyData == cVerifyData') $
        fail "Final verification check failed."
      sendChangeCipherSpec c
      sHandshakeMessages <- emitRecording c
-     let sHandshakeHash     = sha256' sHandshakeMessages
+     let sHandshakeHash     = sha256 sHandshakeMessages
          sVerifyDataInf     = prf masterSecret "server finished" sHandshakeHash
          sVerifyData        = BS.take verifyDataLen sVerifyDataInf
      writeHandshake c (Finished sVerifyData)
@@ -484,6 +480,3 @@ readValidateClientCertificate c opts =
             unless res $
               fail "Client certificates failed validation."
             return (certificatePublicKey first)
-
-sha256' :: ByteString -> ByteString
-sha256' = bytestringDigest . sha256

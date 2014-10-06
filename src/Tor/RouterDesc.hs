@@ -42,6 +42,7 @@ data RouterDesc = RouterDesc {
      , routerCircuitProtocolVersions :: [Int]
      , routerAllowSingleHopExits     :: Bool
      , routerAlternateORAddresses    :: [(String, Word16)]
+     , routerStatus                  :: [String]
      }
  deriving (Show)
 

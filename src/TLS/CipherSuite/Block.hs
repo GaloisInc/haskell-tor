@@ -9,6 +9,7 @@ import Crypto.Classes
 import Crypto.Random
 import Data.ByteString.Lazy(ByteString)
 import qualified Data.ByteString.Lazy as BS
+import Data.Digest.Pure.SHA.HMAC
 import Data.Int
 import Data.Tagged
 import Data.Word
@@ -78,7 +79,7 @@ buildBlockEncryptor hashfun fake myMACKey theirMACKey mWrite tWrite _ _ =
   cipherBlockSize = getBlockSize myWriteKey blockSizeBytes
   lengthMAC       = BS.length (hashfun BS.empty)
   getPadding      = computePadding (fromIntegral cipherBlockSize)
-  cipherHMAC      = hmac hashfun
+  cipherHMAC      = hmac hashfun 64 -- FIXME: Hard-coding this 64 feels evil.
   (myWriteKey, theirWriteKey) = convert fake (build mWrite) (build tWrite)
   --
   getBlockSize :: BlockCipher k => k -> Tagged k ByteLength -> Int

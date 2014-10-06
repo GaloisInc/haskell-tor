@@ -169,7 +169,7 @@ suiteTLS_RSA_WITH_NULL_SHA = CipherSuite {
   , cipherEncryptionKeyLength  = 0
   , cipherHashAlgorithm        = HashSHA1
   , cipherSignatureAlgorithm   = SigRSA
-  , cipherEncryptor            = buildStreamEncryptor sha1' (undefined :: NullKey)
+  , cipherEncryptor            = buildStreamEncryptor sha1 (undefined :: NullKey)
   }
 
 suiteTLS_RSA_WITH_NULL_SHA256 :: CipherSuite
@@ -182,7 +182,7 @@ suiteTLS_RSA_WITH_NULL_SHA256 = CipherSuite {
   , cipherEncryptionKeyLength  = 0
   , cipherHashAlgorithm        = HashSHA256
   , cipherSignatureAlgorithm   = SigRSA
-  , cipherEncryptor            = buildStreamEncryptor sha256' (undefined :: NullKey)
+  , cipherEncryptor            = buildStreamEncryptor sha256 (undefined :: NullKey)
   }
 
 suiteTLS_RSA_WITH_RC4_128_MD5 :: CipherSuite
@@ -208,7 +208,7 @@ suiteTLS_RSA_WITH_RC4_128_SHA = CipherSuite {
   , cipherEncryptionKeyLength  = 128 `div` 8
   , cipherHashAlgorithm        = HashSHA1
   , cipherSignatureAlgorithm   = SigRSA
-  , cipherEncryptor            = buildStreamEncryptor sha1' (undefined :: RC4Key)
+  , cipherEncryptor            = buildStreamEncryptor sha1 (undefined :: RC4Key)
   }
 
 suiteTLS_RSA_WITH_3DES_EDE_CBC_SHA :: CipherSuite
@@ -221,7 +221,7 @@ suiteTLS_RSA_WITH_3DES_EDE_CBC_SHA = CipherSuite {
   , cipherEncryptionKeyLength  = 168 `div` 8
   , cipherHashAlgorithm        = HashSHA1
   , cipherSignatureAlgorithm   = SigRSA
-  , cipherEncryptor            = buildBlockEncryptor sha1' (undefined :: TDESKey)
+  , cipherEncryptor            = buildBlockEncryptor sha1 (undefined :: TDESKey)
   }
 
 suiteTLS_RSA_WITH_AES_128_CBC_SHA :: CipherSuite
@@ -234,7 +234,7 @@ suiteTLS_RSA_WITH_AES_128_CBC_SHA = CipherSuite {
   , cipherEncryptionKeyLength  = 128 `div` 8
   , cipherHashAlgorithm        = HashSHA1
   , cipherSignatureAlgorithm   = SigRSA
-  , cipherEncryptor            = buildBlockEncryptor sha1' (undefined :: AESKey128)
+  , cipherEncryptor            = buildBlockEncryptor sha1 (undefined :: AESKey128)
   }
 
 suiteTLS_RSA_WITH_AES_256_CBC_SHA :: CipherSuite
@@ -247,7 +247,7 @@ suiteTLS_RSA_WITH_AES_256_CBC_SHA = CipherSuite {
   , cipherEncryptionKeyLength  = 256 `div` 8
   , cipherHashAlgorithm        = HashSHA1
   , cipherSignatureAlgorithm   = SigRSA
-  , cipherEncryptor            = buildBlockEncryptor sha1' (undefined :: AESKey256)
+  , cipherEncryptor            = buildBlockEncryptor sha1 (undefined :: AESKey256)
   }
 
 suiteTLS_RSA_WITH_AES_128_CBC_SHA256 :: CipherSuite
@@ -260,7 +260,7 @@ suiteTLS_RSA_WITH_AES_128_CBC_SHA256 = CipherSuite {
   , cipherEncryptionKeyLength  = 128 `div` 8
   , cipherHashAlgorithm        = HashSHA256
   , cipherSignatureAlgorithm   = SigRSA
-  , cipherEncryptor            = buildBlockEncryptor sha256' (undefined :: AESKey128)
+  , cipherEncryptor            = buildBlockEncryptor sha256 (undefined :: AESKey128)
   }
 
 suiteTLS_RSA_WITH_AES_256_CBC_SHA256 :: CipherSuite
@@ -273,7 +273,7 @@ suiteTLS_RSA_WITH_AES_256_CBC_SHA256 = CipherSuite {
   , cipherEncryptionKeyLength  = 256 `div` 8
   , cipherHashAlgorithm        = HashSHA256
   , cipherSignatureAlgorithm   = SigRSA
-  , cipherEncryptor            = buildBlockEncryptor sha256' (undefined :: AESKey256)
+  , cipherEncryptor            = buildBlockEncryptor sha256 (undefined :: AESKey256)
   }
 
 suiteTLS_DH_DSS_WITH_3DES_EDE_CBC_SHA :: CipherSuite
@@ -286,7 +286,7 @@ suiteTLS_DH_DSS_WITH_3DES_EDE_CBC_SHA = CipherSuite {
   , cipherEncryptionKeyLength  = 168 `div` 8
   , cipherHashAlgorithm        = HashSHA1
   , cipherSignatureAlgorithm   = SigDSA
-  , cipherEncryptor            = buildBlockEncryptor sha1' (undefined :: TDESKey)
+  , cipherEncryptor            = buildBlockEncryptor sha1 (undefined :: TDESKey)
   }
 
 suiteTLS_DH_RSA_WITH_3DES_EDE_CBC_SHA :: CipherSuite
@@ -299,7 +299,7 @@ suiteTLS_DH_RSA_WITH_3DES_EDE_CBC_SHA = CipherSuite {
   , cipherEncryptionKeyLength  = 168 `div` 8
   , cipherHashAlgorithm        = HashSHA1
   , cipherSignatureAlgorithm   = SigRSA
-  , cipherEncryptor            = buildBlockEncryptor sha1' (undefined :: TDESKey)
+  , cipherEncryptor            = buildBlockEncryptor sha1 (undefined :: TDESKey)
   }
 
 suiteTLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA :: CipherSuite
@@ -312,7 +312,7 @@ suiteTLS_DHE_DSS_WITH_3DES_EDE_CBC_SHA = CipherSuite {
   , cipherEncryptionKeyLength  = 168 `div` 8
   , cipherHashAlgorithm        = HashSHA1
   , cipherSignatureAlgorithm   = SigDSA
-  , cipherEncryptor            = buildBlockEncryptor sha1' (undefined :: TDESKey)
+  , cipherEncryptor            = buildBlockEncryptor sha1 (undefined :: TDESKey)
   }
 
 suiteTLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA :: CipherSuite
@@ -325,7 +325,7 @@ suiteTLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA = CipherSuite {
   , cipherEncryptionKeyLength  = 168 `div` 8
   , cipherHashAlgorithm        = HashSHA1
   , cipherSignatureAlgorithm   = SigRSA
-  , cipherEncryptor            = buildBlockEncryptor sha1' (undefined :: TDESKey)
+  , cipherEncryptor            = buildBlockEncryptor sha1 (undefined :: TDESKey)
   }
 
 suiteTLS_DH_DSS_WITH_AES_128_CBC_SHA :: CipherSuite
@@ -338,7 +338,7 @@ suiteTLS_DH_DSS_WITH_AES_128_CBC_SHA = CipherSuite {
   , cipherEncryptionKeyLength  = 128 `div` 8
   , cipherHashAlgorithm        = HashSHA1
   , cipherSignatureAlgorithm   = SigDSA
-  , cipherEncryptor            = buildBlockEncryptor sha1' (undefined :: AESKey128)
+  , cipherEncryptor            = buildBlockEncryptor sha1 (undefined :: AESKey128)
   }
 
 suiteTLS_DH_RSA_WITH_AES_128_CBC_SHA :: CipherSuite
@@ -351,7 +351,7 @@ suiteTLS_DH_RSA_WITH_AES_128_CBC_SHA = CipherSuite {
   , cipherEncryptionKeyLength  = 128 `div` 8
   , cipherHashAlgorithm        = HashSHA1
   , cipherSignatureAlgorithm   = SigRSA
-  , cipherEncryptor            = buildBlockEncryptor sha1' (undefined :: AESKey128)
+  , cipherEncryptor            = buildBlockEncryptor sha1 (undefined :: AESKey128)
   }
 
 suiteTLS_DHE_DSS_WITH_AES_128_CBC_SHA :: CipherSuite
@@ -364,7 +364,7 @@ suiteTLS_DHE_DSS_WITH_AES_128_CBC_SHA = CipherSuite {
   , cipherEncryptionKeyLength  = 128 `div` 8
   , cipherHashAlgorithm        = HashSHA1
   , cipherSignatureAlgorithm   = SigDSA
-  , cipherEncryptor            = buildBlockEncryptor sha1' (undefined :: AESKey128)
+  , cipherEncryptor            = buildBlockEncryptor sha1 (undefined :: AESKey128)
   }
 
 suiteTLS_DHE_RSA_WITH_AES_128_CBC_SHA :: CipherSuite
@@ -377,7 +377,7 @@ suiteTLS_DHE_RSA_WITH_AES_128_CBC_SHA = CipherSuite {
   , cipherEncryptionKeyLength  = 128 `div` 8
   , cipherHashAlgorithm        = HashSHA1
   , cipherSignatureAlgorithm   = SigRSA
-  , cipherEncryptor            = buildBlockEncryptor sha1' (undefined :: AESKey128)
+  , cipherEncryptor            = buildBlockEncryptor sha1 (undefined :: AESKey128)
   }
 
 suiteTLS_DH_DSS_WITH_AES_256_CBC_SHA :: CipherSuite
@@ -390,7 +390,7 @@ suiteTLS_DH_DSS_WITH_AES_256_CBC_SHA = CipherSuite {
   , cipherEncryptionKeyLength  = 256 `div` 8
   , cipherHashAlgorithm        = HashSHA1
   , cipherSignatureAlgorithm   = SigDSA
-  , cipherEncryptor            = buildBlockEncryptor sha1' (undefined :: AESKey256)
+  , cipherEncryptor            = buildBlockEncryptor sha1 (undefined :: AESKey256)
   }
 
 suiteTLS_DH_RSA_WITH_AES_256_CBC_SHA :: CipherSuite
@@ -403,7 +403,7 @@ suiteTLS_DH_RSA_WITH_AES_256_CBC_SHA = CipherSuite {
   , cipherEncryptionKeyLength  = 256 `div` 8
   , cipherHashAlgorithm        = HashSHA1
   , cipherSignatureAlgorithm   = SigRSA
-  , cipherEncryptor            = buildBlockEncryptor sha1' (undefined :: AESKey256)
+  , cipherEncryptor            = buildBlockEncryptor sha1 (undefined :: AESKey256)
   }
 
 suiteTLS_DHE_DSS_WITH_AES_256_CBC_SHA :: CipherSuite
@@ -416,7 +416,7 @@ suiteTLS_DHE_DSS_WITH_AES_256_CBC_SHA = CipherSuite {
   , cipherEncryptionKeyLength  = 256 `div` 8
   , cipherHashAlgorithm        = HashSHA1
   , cipherSignatureAlgorithm   = SigDSA
-  , cipherEncryptor            = buildBlockEncryptor sha1' (undefined :: AESKey256)
+  , cipherEncryptor            = buildBlockEncryptor sha1 (undefined :: AESKey256)
   }
 
 suiteTLS_DHE_RSA_WITH_AES_256_CBC_SHA :: CipherSuite
@@ -429,7 +429,7 @@ suiteTLS_DHE_RSA_WITH_AES_256_CBC_SHA = CipherSuite {
   , cipherEncryptionKeyLength  = 256 `div` 8
   , cipherHashAlgorithm        = HashSHA1
   , cipherSignatureAlgorithm   = SigRSA
-  , cipherEncryptor            = buildBlockEncryptor sha1' (undefined :: AESKey256)
+  , cipherEncryptor            = buildBlockEncryptor sha1 (undefined :: AESKey256)
   }
 
 suiteTLS_DH_DSS_WITH_AES_128_CBC_SHA256 :: CipherSuite
@@ -442,7 +442,7 @@ suiteTLS_DH_DSS_WITH_AES_128_CBC_SHA256 = CipherSuite {
   , cipherEncryptionKeyLength  = 128 `div` 8
   , cipherHashAlgorithm        = HashSHA256
   , cipherSignatureAlgorithm   = SigDSA
-  , cipherEncryptor            = buildBlockEncryptor sha256' (undefined :: AESKey128)
+  , cipherEncryptor            = buildBlockEncryptor sha256 (undefined :: AESKey128)
   }
 
 suiteTLS_DH_RSA_WITH_AES_128_CBC_SHA256 :: CipherSuite
@@ -455,7 +455,7 @@ suiteTLS_DH_RSA_WITH_AES_128_CBC_SHA256 = CipherSuite {
   , cipherEncryptionKeyLength  = 128 `div` 8
   , cipherHashAlgorithm        = HashSHA256
   , cipherSignatureAlgorithm   = SigRSA
-  , cipherEncryptor            = buildBlockEncryptor sha256' (undefined :: AESKey128)
+  , cipherEncryptor            = buildBlockEncryptor sha256 (undefined :: AESKey128)
   }
 
 suiteTLS_DHE_DSS_WITH_AES_128_CBC_SHA256 :: CipherSuite
@@ -468,7 +468,7 @@ suiteTLS_DHE_DSS_WITH_AES_128_CBC_SHA256 = CipherSuite {
   , cipherEncryptionKeyLength  = 128 `div` 8
   , cipherHashAlgorithm        = HashSHA256
   , cipherSignatureAlgorithm   = SigDSA
-  , cipherEncryptor            = buildBlockEncryptor sha256' (undefined :: AESKey128)
+  , cipherEncryptor            = buildBlockEncryptor sha256 (undefined :: AESKey128)
   }
 
 suiteTLS_DHE_RSA_WITH_AES_128_CBC_SHA256 :: CipherSuite
@@ -481,7 +481,7 @@ suiteTLS_DHE_RSA_WITH_AES_128_CBC_SHA256 = CipherSuite {
   , cipherEncryptionKeyLength  = 128 `div` 8
   , cipherHashAlgorithm        = HashSHA256
   , cipherSignatureAlgorithm   = SigRSA
-  , cipherEncryptor            = buildBlockEncryptor sha256' (undefined :: AESKey128)
+  , cipherEncryptor            = buildBlockEncryptor sha256 (undefined :: AESKey128)
   }
 
 suiteTLS_DH_DSS_WITH_AES_256_CBC_SHA256 :: CipherSuite
@@ -494,7 +494,7 @@ suiteTLS_DH_DSS_WITH_AES_256_CBC_SHA256 = CipherSuite {
   , cipherEncryptionKeyLength  = 256 `div` 8
   , cipherHashAlgorithm        = HashSHA256
   , cipherSignatureAlgorithm   = SigDSA
-  , cipherEncryptor            = buildBlockEncryptor sha256' (undefined :: AESKey256)
+  , cipherEncryptor            = buildBlockEncryptor sha256 (undefined :: AESKey256)
   }
 
 suiteTLS_DH_RSA_WITH_AES_256_CBC_SHA256 :: CipherSuite
@@ -507,7 +507,7 @@ suiteTLS_DH_RSA_WITH_AES_256_CBC_SHA256 = CipherSuite {
   , cipherEncryptionKeyLength  = 256 `div` 8
   , cipherHashAlgorithm        = HashSHA256
   , cipherSignatureAlgorithm   = SigRSA
-  , cipherEncryptor            = buildBlockEncryptor sha256' (undefined :: AESKey256)
+  , cipherEncryptor            = buildBlockEncryptor sha256 (undefined :: AESKey256)
   }
 
 suiteTLS_DHE_DSS_WITH_AES_256_CBC_SHA256 :: CipherSuite
@@ -520,7 +520,7 @@ suiteTLS_DHE_DSS_WITH_AES_256_CBC_SHA256 = CipherSuite {
   , cipherEncryptionKeyLength  = 256 `div` 8
   , cipherHashAlgorithm        = HashSHA256
   , cipherSignatureAlgorithm   = SigDSA
-  , cipherEncryptor            = buildBlockEncryptor sha256' (undefined :: AESKey256)
+  , cipherEncryptor            = buildBlockEncryptor sha256 (undefined :: AESKey256)
   }
 
 suiteTLS_DHE_RSA_WITH_AES_256_CBC_SHA256 :: CipherSuite
@@ -533,7 +533,7 @@ suiteTLS_DHE_RSA_WITH_AES_256_CBC_SHA256 = CipherSuite {
   , cipherEncryptionKeyLength  = 256 `div` 8
   , cipherHashAlgorithm        = HashSHA256
   , cipherSignatureAlgorithm   = SigRSA
-  , cipherEncryptor            = buildBlockEncryptor sha256' (undefined :: AESKey256)
+  , cipherEncryptor            = buildBlockEncryptor sha256 (undefined :: AESKey256)
   }
 
 suiteTLS_DH_anon_WITH_RC4_128_MD5 :: CipherSuite
@@ -559,7 +559,7 @@ suiteTLS_DH_anon_WITH_3DES_EDE_CBC_SHA = CipherSuite {
   , cipherEncryptionKeyLength  = 168 `div` 8
   , cipherHashAlgorithm        = HashSHA1
   , cipherSignatureAlgorithm   = SigAnonymous
-  , cipherEncryptor            = buildBlockEncryptor sha1' (undefined :: TDESKey)
+  , cipherEncryptor            = buildBlockEncryptor sha1 (undefined :: TDESKey)
   }
 
 suiteTLS_DH_anon_WITH_AES_128_CBC_SHA :: CipherSuite
@@ -572,7 +572,7 @@ suiteTLS_DH_anon_WITH_AES_128_CBC_SHA = CipherSuite {
   , cipherEncryptionKeyLength  = 128 `div` 8
   , cipherHashAlgorithm        = HashSHA1
   , cipherSignatureAlgorithm   = SigAnonymous
-  , cipherEncryptor            = buildBlockEncryptor sha1' (undefined :: AESKey128)
+  , cipherEncryptor            = buildBlockEncryptor sha1 (undefined :: AESKey128)
   }
 
 suiteTLS_DH_anon_WITH_AES_256_CBC_SHA :: CipherSuite
@@ -585,7 +585,7 @@ suiteTLS_DH_anon_WITH_AES_256_CBC_SHA = CipherSuite {
   , cipherEncryptionKeyLength  = 256 `div` 8
   , cipherHashAlgorithm        = HashSHA1
   , cipherSignatureAlgorithm   = SigAnonymous
-  , cipherEncryptor            = buildBlockEncryptor sha1' (undefined :: AESKey256)
+  , cipherEncryptor            = buildBlockEncryptor sha1 (undefined :: AESKey256)
   }
 
 suiteTLS_DH_anon_WITH_AES_128_CBC_SHA256 :: CipherSuite
@@ -598,7 +598,7 @@ suiteTLS_DH_anon_WITH_AES_128_CBC_SHA256 = CipherSuite {
   , cipherEncryptionKeyLength  = 128 `div` 8
   , cipherHashAlgorithm        = HashSHA256
   , cipherSignatureAlgorithm   = SigAnonymous
-  , cipherEncryptor            = buildBlockEncryptor sha256' (undefined :: AESKey128)
+  , cipherEncryptor            = buildBlockEncryptor sha256 (undefined :: AESKey128)
   }
 
 suiteTLS_DH_anon_WITH_AES_256_CBC_SHA256 :: CipherSuite
@@ -611,7 +611,7 @@ suiteTLS_DH_anon_WITH_AES_256_CBC_SHA256 = CipherSuite {
   , cipherEncryptionKeyLength  = 256 `div` 8
   , cipherHashAlgorithm        = HashSHA256
   , cipherSignatureAlgorithm   = SigAnonymous
-  , cipherEncryptor            = buildBlockEncryptor sha256' (undefined :: AESKey256)
+  , cipherEncryptor            = buildBlockEncryptor sha256 (undefined :: AESKey256)
   }
 
 rfc5246CipherSuites :: [CipherSuite]
@@ -656,12 +656,6 @@ rfc5246CipherSuites = [
   ]
 
 -- ----------------------------------------------------------------------------
-
-sha1' :: ByteString -> ByteString
-sha1' = bytestringDigest . sha1
-
-sha256' :: ByteString -> ByteString
-sha256' = bytestringDigest . sha256
 
 md5' :: ByteString -> ByteString
 md5' = encodeLazy . md5

@@ -11,6 +11,7 @@ import Test.Encryptor
 import Test.Framework.Runners.Console
 import Test.Handshake
 import Test.HashAlgorithm
+import Test.HybridEncrypt
 import Test.HMAC
 import Test.PRF
 import Test.ProtocolVersion
@@ -28,8 +29,8 @@ import Test.Zlib
 main :: IO ()
 main =
   defaultMain [
-    word24Tests
-  , torCellTests
+    torCellTests
+  , word24Tests
   , zlibTests
   , alertTests
   , blockTests
@@ -44,6 +45,7 @@ main =
   , hmacTests
   , handshakeTests
   , hashAlgorithmTests
+  , hybridEncryptionTest
   , prfTests
   , protocolVersionTests
   , rc4Tests

@@ -33,7 +33,7 @@ parseDirectory bstr = map parseChunk (chunkRouters bstr)
                sig = routerSignature res
                -- Tor uses a weird variation on PKCS signing in which they don't
                -- transmit the hash type
-               hashSHA1' = HashInfo BS.empty (bytestringDigest . sha1)
+               hashSHA1' = HashInfo BS.empty sha1
            in case rsassa_pkcs1_v1_5_verify hashSHA1' key signedPortion sig of
                 Left err ->
                   Left ("RSA verification failed: " ++ show err ++ "  " ++ show (BS.length sig))
@@ -232,6 +232,7 @@ routerStart =
          , routerAllowSingleHopExits     = False
          , routerAlternateORAddresses    = []
          , routerParseLog                = []
+         , routerStatus                  = []
          }
      if socksport /= 0
         then return (warn result "RouterDesc incorrectly set nonzero SOCKS port.")

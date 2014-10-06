@@ -22,6 +22,7 @@ import Data.String
 import Data.Time
 import Data.Word
 import Data.X509
+import Hexdump
 import Tor.State.RNG
 
 data CredentialState = NextCheckAt UTCTime | Regenerating
@@ -50,7 +51,8 @@ newCredentials rng logMsg =
      return Credentials{..}
  where
   -- FIXME: probably should use a real fingerprint.
-  showFingerprint c = show (sha1 (fromStrict (getSignedData (fst c))))
+  showFingerprint c =
+    filter (/= ' ') (simpleHex (sha1Strict (getSignedData (fst c))))
 
 getSigningKey :: Credentials -> UTCTime ->
                  STM (SignedCertificate, PrivKey, Maybe (RNG -> STM String))
