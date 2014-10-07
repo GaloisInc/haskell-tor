@@ -2,6 +2,8 @@ module Tor.Circuit(
          createCircuit
        , extendCircuit
        , destroyCircuit
+       --
+       , resolveName
        )
  where
 
@@ -18,6 +20,8 @@ import Data.ByteString.Lazy(ByteString)
 import qualified Data.ByteString.Lazy as BS
 import Data.Digest.Pure.SHA
 import Data.Digest.Pure.SHA1
+import Data.Map.Strict(Map)
+import qualified Data.Map.Strict as Map
 import Data.Word
 import TLS.Certificate
 import TLS.DiffieHellman
@@ -36,6 +40,7 @@ data TorCircuit = TorCircuit {
      , circCircuitId          :: Word32
      , circNextStreamId       :: MVar Word16
      , circExtendWaiter       :: MVar (Either DestroyReason ByteString)
+     , circResolveWaiters     :: MVar (Map Word16 (MVar [(TorAddress, Word32)]))
      , circForwardCryptoData  :: MVar [(EncryptionState, SHA1State)]
      , circBackwardCryptoData :: MVar [(EncryptionState, SHA1State)]
      }
@@ -54,15 +59,6 @@ circSendUpstream :: TorCircuit -> TorCell -> IO ()
 circSendUpstream _ _ =
   do putStrLn "WARNING: circSendUpstream"
      return ()
-
--- Destroy the circuit, sending the given reason upstream.
-destroyCircuit :: TorCircuit -> DestroyReason -> IO ()
-destroyCircuit circ reason =
-  do _ <- tryPutMVar (circExtendWaiter circ) (Left reason)
-     let circId = circCircuitId circ
-         link   = circForwardLink circ
-     writeCell link (Destroy circId reason)
-     endCircuit link circId
 
 -- -----------------------------------------------------------------------------
 
@@ -87,7 +83,16 @@ createCircuit torst firstRouter =
               bencMV <- newMVar [bencstate]
               strmMV <- newMVar 1
               ewMV   <- newEmptyMVar
-              let circ = TorCircuit link circId strmMV ewMV fencMV bencMV
+              rsvMV  <- newMVar Map.empty
+              let circ = TorCircuit {
+                           circForwardLink        = link
+                         , circCircuitId          = circId
+                         , circNextStreamId       = strmMV
+                         , circExtendWaiter       = ewMV
+                         , circResolveWaiters     = rsvMV
+                         , circForwardCryptoData  = fencMV
+                         , circBackwardCryptoData = bencMV
+                         }
                   handler' = backwardRelayHandler torst circ
               modifyCircuitHandler link circId handler'
               return (Right circ)
@@ -139,6 +144,26 @@ extendCircuit torst circ nextRouter =
     , relayExtendIdent   = keyHash' sha1 (routerSigningKey nextRouter)
     }
 
+-- Destroy the circuit, sending the given reason upstream.
+destroyCircuit :: TorCircuit -> DestroyReason -> IO ()
+destroyCircuit circ reason =
+  do _ <- tryPutMVar (circExtendWaiter circ) (Left reason)
+     let circId = circCircuitId circ
+         link   = circForwardLink circ
+     writeCell link (Destroy circId reason)
+     endCircuit link circId
+
+-- -----------------------------------------------------------------------------
+
+resolveName :: TorCircuit -> String -> IO [(TorAddress, Word32)]
+resolveName circ str =
+  do strmId <- getNextStreamId circ
+     resMV  <- newEmptyMVar
+     modifyMVar_ (circResolveWaiters circ) $ \ m ->
+       return (Map.insert strmId resMV m)
+     writeCellOnCircuit circ (RelayResolve strmId str)
+     takeMVar resMV
+
 -- -----------------------------------------------------------------------------
 
 writeCellOnCircuit :: TorCircuit -> RelayCell -> IO ()
@@ -163,6 +188,10 @@ writeCellOnCircuit circ relay =
   pickBuilder RelayExtend2{} = RelayEarly
   pickBuilder _              = RelayEarly
 
+getNextStreamId :: TorCircuit -> IO Word16
+getNextStreamId circ = modifyMVar (circNextStreamId circ) $ \ x ->
+  return (x + 1, x)
+
 -- -----------------------------------------------------------------------------
 
 -- This handler is called when we receive data from an earlier link in the
@@ -181,37 +210,23 @@ backwardRelayHandler torst circ cell =
          let (keysnhashes', res) = decryptUntilClean body keysnhashes
          putMVar (circBackwardCryptoData circ) keysnhashes'
          case res of
-           Nothing ->
-             do logMsg torst ("Relay destined for upstream consumer.")
-                BS.writeFile "testblob" body
-                circSendUpstream circ (Relay cnum body)
+           Nothing -> circSendUpstream circ (Relay cnum body)
            Just x ->
-               case x of
-                 RelayData{} ->
-                   logMsg torst ("Recieved (B) RELAY_DATA")
-                 RelayEnd{} ->
-                   destroyCircuit circ CircuitDestroyed
-                 RelayConnected{} ->
-                   logMsg torst ("Received (B) RELAY_CONNECTED")
-                 RelaySendMe{} ->
-                   logMsg torst ("Received (B) RELAY_SENDME")
-                 RelayExtended{} ->
-                   do ok <- tryPutMVar (circExtendWaiter circ)
-                                       (Right (relayExtendedData x))
-                      unless ok $
-                        do destroyCircuit circ InternalError
-                           logMsg torst ("Received RELAY_EXTENDED but not " ++
-                                         "extending relay.")
-                 RelayTruncated{} ->
-                   logMsg torst ("Received (B) RELAY_TRUNCATED: " ++ show (relayTruncatedRsn x))
-                 RelayDrop{} ->
-                   return ()
-                 RelayResolved{} ->
-                   logMsg torst ("Received (B) RELAY_RESOLVED")
-                 RelayExtended2{} ->
-                   logMsg torst ("Received (B) RELAY_EXTENDED2")
-                 _ ->
-                   logMsg torst ("Weird message on backward stream: " ++show x)
+             case x of
+               RelayData{} ->
+                 logMsg torst ("Recieved (B) RELAY_DATA")
+               RelayEnd{} ->
+                 destroyCircuit circ CircuitDestroyed
+               RelayConnected{} ->
+                 logMsg torst ("Received (B) RELAY_CONNECTED")
+               RelaySendMe{} ->
+                 logMsg torst ("Received (B) RELAY_SENDME")
+               RelayExtended{}  -> continueExtend (relayExtendedData x)
+               RelayTruncated{} -> answerResolve x []
+               RelayDrop{}      -> return ()
+               RelayResolved{}  -> answerResolve x (relayResolvedAddrs x)
+               RelayExtended2{} -> return () -- FIXME
+               _                -> return ()
     RelayEarly cnum body ->
       -- Treat RelayEarly as Relay. This could be a problem. FIXME?
       backwardRelayHandler torst circ (Relay cnum body)
@@ -220,19 +235,30 @@ backwardRelayHandler torst circ cell =
          destroyCircuit circ reason
     _ ->
       logMsg torst ("Spurious message along relay.")
-
-decryptUntilClean :: ByteString -> [(EncryptionState, SHA1State)] ->
-                     ([(EncryptionState, SHA1State)], Maybe RelayCell)
-decryptUntilClean _    []                    =
-  ([], Nothing)
-decryptUntilClean bstr ((encstate, h1):rest) =
-  let (bstr', encstate') = decryptData encstate bstr
-  in case runGetOrFail (parseRelayCell h1) bstr' of
-       Left _ ->
-         let (rest', res) = decryptUntilClean bstr' rest
-         in ((encstate', h1) : rest', res)
-       Right (_, _, (x, h1')) ->
-         (((encstate', h1') : rest), Just x)
+ where
+  answerResolve x result =
+    do mmv <- modifyMVar (circResolveWaiters circ) $ \ mvmap ->
+                return (Map.delete (relayStreamId x) mvmap,
+                        Map.lookup (relayStreamId x) mvmap)
+       case mmv of
+         Nothing -> return ()
+         Just mv -> putMVar mv result
+  --
+  continueExtend extdata =
+    do ok <- tryPutMVar (circExtendWaiter circ) (Right extdata)
+       unless ok $ destroyCircuit circ InternalError
+  --
+  decryptUntilClean :: ByteString -> [(EncryptionState, SHA1State)] ->
+                       ([(EncryptionState, SHA1State)], Maybe RelayCell)
+  decryptUntilClean _    []                    = ([], Nothing)
+  decryptUntilClean bstr ((encstate, h1):rest) =
+    let (bstr', encstate') = decryptData encstate bstr
+    in case runGetOrFail (parseRelayCell h1) bstr' of
+         Left _ ->
+           let (rest', res) = decryptUntilClean bstr' rest
+           in ((encstate', h1) : rest', res)
+         Right (_, _, (x, h1')) ->
+           (((encstate', h1') : rest), Just x)
 
 -- -----------------------------------------------------------------------------
 

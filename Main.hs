@@ -1,12 +1,6 @@
 import Control.Concurrent(forkIO,threadDelay)
 import Control.Exception
 import Control.Monad
-import Crypto.Types.PubKey.RSA
-import Data.ASN1.BinaryEncoding
-import Data.ASN1.Encoding
-import Data.ASN1.Types
-import Data.ByteString.Base64.Lazy(decode)
-import Data.ByteString.Lazy.Char8(pack)
 import Data.List
 import Data.Time
 import Data.Word
@@ -21,21 +15,27 @@ import Tor.RouterDesc
 import Tor.State
 
 -- -----------------------------------------------------------------------------
+-- import Crypto.Types.PubKey.RSA
+-- import Data.ASN1.BinaryEncoding
+-- import Data.ASN1.Encoding
+-- import Data.ASN1.Types
+-- import Data.ByteString.Base64.Lazy(decode)
+-- import Data.ByteString.Lazy.Char8(pack)
 
-getRouter' :: a -> b -> IO RouterDesc
-getRouter' _ _ =
-  do str <- readFile "/Users/awick/.tor/keys/secret_onion_key"
-     let Right bstr = decode (pack (concat (init (tail (lines str)))))
-     let Right asn1s = decodeASN1 DER bstr
-     case fromASN1 asn1s of
-       Left err -> fail ("ASN1 decode error: " ++ err)
-       Right (x, _) ->
-         return RouterDesc {
-           routerNickname    = "localhost"
-         , routerIPv4Address = "127.0.0.1"
-         , routerORPort      = 9001
-         , routerOnionKey    = private_pub x
-         }
+-- getRouter' :: a -> b -> IO RouterDesc
+-- getRouter' _ _ =
+--   do str <- readFile "/Users/awick/.tor/keys/secret_onion_key"
+--      let Right bstr = decode (pack (concat (init (tail (lines str)))))
+--      let Right asn1s = decodeASN1 DER bstr
+--      case fromASN1 asn1s of
+--        Left err -> fail ("ASN1 decode error: " ++ err)
+--        Right (x, _) ->
+--          return RouterDesc {
+--            routerNickname    = "localhost"
+--          , routerIPv4Address = "127.0.0.1"
+--          , routerORPort      = 9001
+--          , routerOnionKey    = private_pub x
+--          }
 
 buildCircularCircuit :: TorState ls s -> IO ()
 buildCircularCircuit torState = catch tryCircular notPublic
@@ -57,7 +57,8 @@ buildCircularCircuit torState = catch tryCircular notPublic
        myDesc     <- getRouter torState [NotRouter initRouter, NotRouter midRouter]
        putStrLn ("Extending router to " ++ routerIPv4Address myDesc)
        ()         <- throwLeft =<< extendCircuit torState circ myDesc
-       logMsg torState ("Cycle circuit created. Yay! Closing it.")
+       nms        <- resolveName circ "google.com"
+       putStrLn ("Resolved google.com to " ++ show nms)
        destroyCircuit circ NoReason
 
 
