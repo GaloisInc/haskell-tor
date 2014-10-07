@@ -34,9 +34,10 @@ import Tor.State
 data TorCircuit = TorCircuit {
        circForwardLink        :: TorLink
      , circCircuitId          :: Word32
+     , circNextStreamId       :: MVar Word16
      , circExtendWaiter       :: MVar (Either DestroyReason ByteString)
-     , circForwardCryptoData  :: MVar ([SHA1State], [EncryptionState], Word64)
-     , circBackwardCryptoData :: MVar ([SHA1State], [EncryptionState])
+     , circForwardCryptoData  :: MVar [(EncryptionState, SHA1State)]
+     , circBackwardCryptoData :: MVar [(EncryptionState, SHA1State)]
      }
 
 -- Send a cell downstream in the circuit, in the cirection of the CREATE
@@ -79,21 +80,17 @@ createCircuit torst firstRouter =
        egx <- withRNG torst (hybridEncrypt True nodePub gxBS)
        writeCell link (Create circId egx)
        initres <- takeMVar waitMV
-       case initres of
-         Left destReason ->
-           return (Left ("Could not create initial link: " ++ show destReason))
-         Right rbstr ->
-              -- FIXME: Should be checking for degenerate cases.
-           do let (ok, keyf, fhash, keyb, bhash) = completeTAPHandshake x rbstr
-              if ok
-                 then do fcdMV   <- newMVar ([fhash], [keyf], 0)
-                         bcdMV   <- newMVar ([bhash], [keyb])
-                         ewMV    <- newEmptyMVar
-                         let circ = TorCircuit link circId ewMV fcdMV bcdMV
-                             handler' = backwardRelayHandler torst circ
-                         modifyCircuitHandler link circId handler'
-                         return (Right circ)
-                 else return (Left "Key agreement failure.")
+       case completeTAPHandshake x initres of
+         Left err -> return (Left err)
+         Right (fencstate, bencstate) ->
+           do fencMV <- newMVar [fencstate]
+              bencMV <- newMVar [bencstate]
+              strmMV <- newMVar 1
+              ewMV   <- newEmptyMVar
+              let circ = TorCircuit link circId strmMV ewMV fencMV bencMV
+                  handler' = backwardRelayHandler torst circ
+              modifyCircuitHandler link circId handler'
+              return (Right circ)
  where
   failLeft (Left str) = error str
   failLeft (Right x)  = x
@@ -125,23 +122,14 @@ extendCircuit torst circ nextRouter =
      egx <- withRNG torst (hybridEncrypt True (routerOnionKey nextRouter) gxBS)
      writeCellOnCircuit circ (extendCell egx)
      res <- takeMVar (circExtendWaiter circ)
-     case res of
-       Left drsn ->
-         return (Left (show drsn))
-       Right rbstr ->
-         do let (ok, keyf, fhash, keyb, bhash) = completeTAPHandshake x rbstr
-            if ok
-               then do (fhs, fks, cntr) <- takeMVar (circForwardCryptoData circ)
-                       let fhs' = fhash : fhs -- fhs ++ [fhash]
-                           fks' = keyf : fks -- fks ++ [keyf]
-                       (bhs, bks) <- takeMVar (circBackwardCryptoData circ)
-                       let bhs' = bhs ++ [bhash]
-                           bks' = bks ++ [keyb]
-                       putMVar (circForwardCryptoData circ)  (fhs', fks', cntr)
-                       putMVar (circBackwardCryptoData circ) (bhs', bks')
-                       logMsg torst ("Extended circuit to " ++ routerIPv4Address nextRouter)
-                       return (Right ())
-               else return (Left "Key agreement failure.")
+     case completeTAPHandshake x res of
+       Left err -> return (Left err)
+       Right (fencstate, bencstate) ->
+         do modifyMVar_ (circForwardCryptoData circ) $ \ rest ->
+              return (rest ++ [fencstate])
+            modifyMVar_ (circBackwardCryptoData circ) $ \ rest ->
+              return (rest ++ [bencstate])
+            return (Right ())
  where
   extendCell skin = RelayExtend {
       relayStreamId      = 0
@@ -155,24 +143,25 @@ extendCircuit torst circ nextRouter =
 
 writeCellOnCircuit :: TorCircuit -> RelayCell -> IO ()
 writeCellOnCircuit circ relay =
-  do (sha1ss, keys, cellCount) <- takeMVar (circForwardCryptoData circ)
-     let (lastState:restStates) = sha1ss
-         (bstr,lastState')      = renderRelayCell lastState relay
-         (encbstr, keys')       = encryptWithKeys bstr keys
-         builder                = pickBuilder relay
-     writeCell (circForwardLink circ) (builder (circCircuitId circ) encbstr)
-     let sha1ss' = lastState' : restStates
-     putMVar (circForwardCryptoData circ) (sha1ss', keys', cellCount + 1)
+  do keysnhashes <- takeMVar (circForwardCryptoData circ)
+     let (cell, keysnhashes') = synthesizeRelay keysnhashes
+         circId               = circCircuitId circ
+     writeCell (circForwardLink circ) (pickBuilder relay circId cell)
+     putMVar (circForwardCryptoData circ) keysnhashes'
  where
+  synthesizeRelay [] = error "synthesizeRelay reached empty list?!"
+  synthesizeRelay [(estate, hash)] =
+    let (bstr, hash')      = renderRelayCell hash relay
+        (encbstr, estate') = encryptData estate bstr
+    in (encbstr, [(estate', hash')])
+  synthesizeRelay ((estate, hash) : rest) =
+    let (bstr, rest')      = synthesizeRelay rest
+        (encbstr, estate') = encryptData estate bstr
+    in (encbstr, (estate', hash) : rest')
+  --
   pickBuilder RelayExtend{}  = RelayEarly
   pickBuilder RelayExtend2{} = RelayEarly
   pickBuilder _              = RelayEarly
-  --
-  encryptWithKeys bstr [] = (bstr, [])
-  encryptWithKeys bstr (encstate:rstates) =
-    let (bstr', encstate') = encryptData encstate bstr
-        (res,   rstates')  = encryptWithKeys bstr' rstates
-    in (res, encstate' : rstates') 
 
 -- -----------------------------------------------------------------------------
 
@@ -188,9 +177,9 @@ backwardRelayHandler :: TorState ls s -> TorCircuit ->
 backwardRelayHandler torst circ cell =
   case cell of
     Relay cnum body ->
-      do (hashes, keys) <- takeMVar (circBackwardCryptoData circ)
-         (keys', hashes', res) <- decryptUntilClean body keys hashes
-         putMVar (circBackwardCryptoData circ) (hashes', keys')
+      do keysnhashes <- takeMVar (circBackwardCryptoData circ)
+         let (keysnhashes', res) = decryptUntilClean body keysnhashes
+         putMVar (circBackwardCryptoData circ) keysnhashes'
          case res of
            Nothing ->
              do logMsg torst ("Relay destined for upstream consumer.")
@@ -201,7 +190,7 @@ backwardRelayHandler torst circ cell =
                  RelayData{} ->
                    logMsg torst ("Recieved (B) RELAY_DATA")
                  RelayEnd{} ->
-                   logMsg torst ("Recieved (B) RELAY_END")
+                   destroyCircuit circ CircuitDestroyed
                  RelayConnected{} ->
                    logMsg torst ("Received (B) RELAY_CONNECTED")
                  RelaySendMe{} ->
@@ -216,7 +205,7 @@ backwardRelayHandler torst circ cell =
                  RelayTruncated{} ->
                    logMsg torst ("Received (B) RELAY_TRUNCATED: " ++ show (relayTruncatedRsn x))
                  RelayDrop{} ->
-                   logMsg torst ("Received (B) RELAY_DROP")
+                   return ()
                  RelayResolved{} ->
                    logMsg torst ("Received (B) RELAY_RESOLVED")
                  RelayExtended2{} ->
@@ -232,22 +221,18 @@ backwardRelayHandler torst circ cell =
     _ ->
       logMsg torst ("Spurious message along relay.")
 
-decryptUntilClean :: ByteString -> [EncryptionState] -> [SHA1State] ->
-                     IO ([EncryptionState], [SHA1State], Maybe RelayCell)
-decryptUntilClean _    []                            [] =
-  return ([], [], Nothing)
-decryptUntilClean _    []                            _  =
-  fail "DecryptUntilClean with unevent arguments."
-decryptUntilClean _    _                             [] =
-  fail "DecryptUntilClean with unevent arguments. (2)"
-decryptUntilClean bstr (encstate:rstates) (h1:rhashes) =
-  do let (bstr', encstate') = decryptData encstate bstr
-     case runGetOrFail (parseRelayCell h1) bstr' of
+decryptUntilClean :: ByteString -> [(EncryptionState, SHA1State)] ->
+                     ([(EncryptionState, SHA1State)], Maybe RelayCell)
+decryptUntilClean _    []                    =
+  ([], Nothing)
+decryptUntilClean bstr ((encstate, h1):rest) =
+  let (bstr', encstate') = decryptData encstate bstr
+  in case runGetOrFail (parseRelayCell h1) bstr' of
        Left _ ->
-         do (rstates', rhashes', res) <- decryptUntilClean bstr' rstates rhashes
-            return (encstate' : rstates', h1 : rhashes', res)
+         let (rest', res) = decryptUntilClean bstr' rest
+         in ((encstate', h1) : rest', res)
        Right (_, _, (x, h1')) ->
-         return (encstate' : rstates, h1' : rhashes, Just x)
+         (((encstate', h1') : rest), Just x)
 
 -- -----------------------------------------------------------------------------
 
@@ -285,10 +270,13 @@ generateLocal' g =
     Left err      -> error ("generateLocal': " ++ show err)
     Right (x, g') -> (x, g')
 
-completeTAPHandshake :: Integer -> ByteString ->
-                        (Bool, EncryptionState, SHA1State,
-                               EncryptionState, SHA1State)
-completeTAPHandshake x rbstr = (kh == kh', encsf, fhash, encsb, bhash)
+completeTAPHandshake :: Integer -> Either DestroyReason ByteString ->
+                        Either String ((EncryptionState, SHA1State),
+                                       (EncryptionState, SHA1State))
+completeTAPHandshake _ (Left drsn) = Left (show drsn)
+completeTAPHandshake x (Right rbstr)
+  | kh == kh' = Right ((encsf, fhash), (encsb, bhash))
+  | otherwise = Left "Key agreement failure."
  where
   (gyBS, kh)   = BS.splitAt 128 rbstr
   gy           = os2ip gyBS
