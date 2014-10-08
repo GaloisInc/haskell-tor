@@ -15,7 +15,8 @@ import Control.Monad
 import Crypto.Random
 import Data.Array.Base
 import Data.Binary.Get
-import Data.ByteString.Lazy(ByteString, empty, fromStrict)
+import Data.Bits
+import Data.ByteString.Lazy(ByteString, empty, fromStrict, unpack)
 import Data.Digest.Pure.SHA
 import Data.List
 import Data.Maybe
@@ -24,6 +25,7 @@ import Data.Word
 import System.Locale
 import TLS.Certificate
 import Tor.DataFormat.Consensus
+import Tor.DataFormat.TorAddress
 import Tor.NetworkStack
 import Tor.NetworkStack.Fetch
 import Tor.RouterDesc
@@ -45,7 +47,12 @@ data RouterEntry = Unfetched Router
                  | Fetched RouterDesc
 
 data RouterRestriction = IsStable -- ^Marked with the Stable flag
-                       | NotRouter RouterDesc
+                       | NotRouter RouterDesc -- ^Is not the given router
+                       | NotTorAddr TorAddress -- ^Is not the given address
+                       | ExitNode -- ^Is an exit node of some kind
+                       | ExitNodeAllowing TorAddress Word16
+                         -- ^Is an exit node that allows traffic to the given
+                         -- address and port.
 
 -- |Build a new router database. This database will return before it is fully
 -- initialized, in order to make general start-up faster. This may mean that
@@ -90,12 +97,76 @@ getRouter (RouterDB routerdb) restrictions rng = withRNGSTM rng get
   meetsRestrictions   (Fetched rtr) []       = Just rtr
   meetsRestrictions x@(Fetched rtr) (r:rest) =
     case r of
-      IsStable | "Stable" `elem` routerStatus rtr -> meetsRestrictions x rest
-               | otherwise                        -> Nothing
-      NotRouter rdesc | isSameRouter rtr rdesc    -> Nothing
-                      | otherwise                 -> meetsRestrictions x rest
+      IsStable | "Stable" `elem` routerStatus rtr  -> meetsRestrictions x rest
+               | otherwise                         -> Nothing
+      NotRouter rdesc | isSameRouter rtr rdesc     -> Nothing
+                      | otherwise                  -> meetsRestrictions x rest
+      NotTorAddr taddr | isSameAddr taddr rtr      -> Nothing
+                       | otherwise                 -> meetsRestrictions x rest
+      ExitNode | allowsExits (routerExitRules rtr) -> meetsRestrictions x rest
+               | otherwise                         -> Nothing
+      ExitNodeAllowing a p
+            | allowsExit (routerExitRules rtr) a p -> meetsRestrictions x rest
+            | otherwise                            -> Nothing
   --
   isSameRouter r1 r2 = routerSigningKey r1 == routerSigningKey r2
+  --
+  isSameAddr (IP4 x) r = x == routerIPv4Address r
+  isSameAddr (IP6 x) r = x `elem` map fst (routerAlternateORAddresses r)
+  isSameAddr _       _ = False
+  --
+  allowsExits (ExitRuleReject AddrSpecAll PortSpecAll : _) = False
+  allowsExits _ = True
+  --
+  allowsExit [] _ _ = True -- "if no rule matches, the address wil be accepted"
+  allowsExit (ExitRuleAccept addrrule portrule : rest) addr port
+    | addrMatches addr addrrule && portMatches port portrule = True
+    | otherwise = allowsExit rest addr port
+  allowsExit (ExitRuleReject addrrule portrule : rest) addr port
+    | addrMatches addr addrrule && portMatches port portrule = False
+    | otherwise = allowsExit rest addr port
+  --
+  portMatches _ PortSpecAll           = True
+  portMatches p (PortSpecRange p1 p2) = (p >= p1) && (p <= p2)
+  portMatches p (PortSpecSingle p')   = p == p'
+  --
+  addrMatches :: TorAddress -> AddrSpec -> Bool
+  addrMatches (Hostname _)          _                     = False
+  addrMatches (TransientError _)    _                     = False
+  addrMatches (NontransientError _) _                     = False
+  addrMatches _                     AddrSpecAll           = True
+  addrMatches (IP4 addr)            (AddrSpecIP4 addr')   = addr == addr'
+  addrMatches (IP4 addr)            (AddrSpecIP4Mask a m) = ip4in' addr a m
+  addrMatches (IP4 addr)            (AddrSpecIP4Bits a b) = ip4in  addr a b
+  addrMatches (IP4 _)               (AddrSpecIP6 _)       = False
+  addrMatches (IP4 _)               (AddrSpecIP6Bits _ _) = False
+  addrMatches (IP6 _)               (AddrSpecIP4 _)       = False
+  addrMatches (IP6 _)               (AddrSpecIP4Mask _ _) = False
+  addrMatches (IP6 _)               (AddrSpecIP4Bits _ _) = False
+  addrMatches (IP6 addr)            (AddrSpecIP6 addr')   = addr `ip6eq` addr'
+  addrMatches (IP6 addr)            (AddrSpecIP6Bits a b) = ip6in addr a b
+  --
+  ip4in' addr addr' mask =
+     masked (unAddr IP4 addr) mask' == masked (unAddr IP4 addr') mask'
+    where mask' = generateMaskFromMask mask
+  ip4in  addr addr' bits =
+     masked (unAddr IP4 addr) mask == masked (unAddr IP4 addr') mask
+    where mask  = generateMaskFromBits bits 4
+  ip6in  addr addr' bits =
+     masked (unAddr IP6 addr) mask == masked (unAddr IP6 addr') mask
+    where mask  = generateMaskFromBits bits 16
+  ip6eq  addr1 addr2 = expandIPv6 addr1 == expandIPv6 addr2
+  --
+  unAddr b = unpack . torAddressByteString . b
+  generateMaskFromMask x = unAddr IP4 x
+  generateMaskFromBits :: Int -> Int -> [Word8]
+  generateMaskFromBits bits len
+    | len == 0  = []
+    | bits == 0 = 0   : generateMaskFromBits bits       (len - 1)
+    | bits >= 8 = 255 : generateMaskFromBits (bits - 8) (len - 1)
+    | otherwise = (255 `shiftL` (8 - len)) : generateMaskFromBits 0 (len - 1)
+  masked a m = zipWith xor a m
+  expandIPv6 = unAddr IP6
 
 updateConsensus :: TorNetworkStack ls s ->
                    RNG -> DirectoryDB -> (String -> IO ()) ->

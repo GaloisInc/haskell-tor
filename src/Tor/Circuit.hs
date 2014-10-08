@@ -3,7 +3,10 @@ module Tor.Circuit(
        , extendCircuit
        , destroyCircuit
        --
+       , TorConnection(..)
        , resolveName
+       , connectToHost
+       , connectToHost'
        )
  where
 
@@ -20,6 +23,7 @@ import Data.ByteString.Lazy(ByteString)
 import qualified Data.ByteString.Lazy as BS
 import Data.Digest.Pure.SHA
 import Data.Digest.Pure.SHA1
+import Data.Int
 import Data.Map.Strict(Map)
 import qualified Data.Map.Strict as Map
 import Data.Word
@@ -41,6 +45,8 @@ data TorCircuit = TorCircuit {
      , circNextStreamId       :: MVar Word16
      , circExtendWaiter       :: MVar (Either DestroyReason ByteString)
      , circResolveWaiters     :: MVar (Map Word16 (MVar [(TorAddress, Word32)]))
+     , circConnectionWaiters  :: MVar (Map Word16 (MVar (Either RelayEndReason TorConnection)))
+     , circDataBuffers        :: MVar (Map Word16 (TVar ByteString))
      , circForwardCryptoData  :: MVar [(EncryptionState, SHA1State)]
      , circBackwardCryptoData :: MVar [(EncryptionState, SHA1State)]
      }
@@ -84,12 +90,16 @@ createCircuit torst firstRouter =
               strmMV <- newMVar 1
               ewMV   <- newEmptyMVar
               rsvMV  <- newMVar Map.empty
+              conMV  <- newMVar Map.empty
+              dbfMV  <- newMVar Map.empty
               let circ = TorCircuit {
                            circForwardLink        = link
                          , circCircuitId          = circId
                          , circNextStreamId       = strmMV
                          , circExtendWaiter       = ewMV
                          , circResolveWaiters     = rsvMV
+                         , circConnectionWaiters  = conMV
+                         , circDataBuffers        = dbfMV
                          , circForwardCryptoData  = fencMV
                          , circBackwardCryptoData = bencMV
                          }
@@ -155,6 +165,15 @@ destroyCircuit circ reason =
 
 -- -----------------------------------------------------------------------------
 
+data TorConnection = TorConnection {
+       torWrite :: ByteString -> IO ()
+     , torRead  :: Int64 -> IO ByteString
+     , torClose :: IO ()
+     }
+
+-- |Resolve the given name anonymously on the given circuit. In some cases,
+-- you may receive error values amongst the responses. The Word32 provided with
+-- each response is a TTL for that response.
 resolveName :: TorCircuit -> String -> IO [(TorAddress, Word32)]
 resolveName circ str =
   do strmId <- getNextStreamId circ
@@ -163,6 +182,32 @@ resolveName circ str =
        return (Map.insert strmId resMV m)
      writeCellOnCircuit circ (RelayResolve strmId str)
      takeMVar resMV
+
+-- |Connect to the given address and port through the given circuit. The result
+-- is a connection that can be used to read, write, and close the connection.
+-- (This is equivalent to calling connectToHost' with True, True, and False for
+-- the extra arguments.
+connectToHost :: TorCircuit -> TorAddress -> Word16 -> IO TorConnection
+connectToHost tc a p = connectToHost' tc a p True True False
+
+-- |Connect to the given address and port through the given circuit. The result
+-- is a connection that can be used to read, write, and close the connection.
+-- The booleans determine if an IPv4 connection is OK, an IPv6 connection is OK,
+-- and whether IPv6 is preferred, respectively.
+connectToHost' :: TorCircuit ->
+                  TorAddress -> Word16 ->
+                  Bool -> Bool -> Bool ->
+                  IO TorConnection
+connectToHost' circ addr port ip4ok ip6ok ip6pref =
+  do strmId <- getNextStreamId circ
+     resMV  <- newEmptyMVar
+     modifyMVar_ (circConnectionWaiters circ) $ \ m ->
+       return (Map.insert strmId resMV m)
+     writeCellOnCircuit circ (RelayBegin strmId addr port ip4ok ip6ok ip6pref)
+     throwLeft =<< takeMVar resMV
+ where
+  throwLeft (Left a)  = throwIO a
+  throwLeft (Right x) = return x
 
 -- -----------------------------------------------------------------------------
 
@@ -213,14 +258,11 @@ backwardRelayHandler torst circ cell =
            Nothing -> circSendUpstream circ (Relay cnum body)
            Just x ->
              case x of
-               RelayData{} ->
-                 logMsg torst ("Recieved (B) RELAY_DATA")
-               RelayEnd{} ->
-                 destroyCircuit circ CircuitDestroyed
-               RelayConnected{} ->
-                 logMsg torst ("Received (B) RELAY_CONNECTED")
-               RelaySendMe{} ->
-                 logMsg torst ("Received (B) RELAY_SENDME")
+               RelayData{}      -> addDataBlock x (relayData x)
+               RelayEnd{}       -> do destroyConnection x    (relayEndReason x)
+                                      destroyCircuit    circ CircuitDestroyed
+               RelayConnected{} -> finalizeConnect x
+               RelaySendMe{}    -> logMsg torst ("Received (B) RELAY_SENDME")
                RelayExtended{}  -> continueExtend (relayExtendedData x)
                RelayTruncated{} -> answerResolve x []
                RelayDrop{}      -> return ()
@@ -236,10 +278,17 @@ backwardRelayHandler torst circ cell =
     _ ->
       logMsg torst ("Spurious message along relay.")
  where
+  addDataBlock x block =
+    do mmv <- getDeleteFromMap (circDataBuffers circ) (relayStreamId x)
+       case mmv of
+         Nothing -> return ()
+         Just tv -> atomically $ do orig <- readTVar tv
+                                    writeTVar tv (orig `BS.append` block)
+  getDeleteFromMap mapMV key =
+    modifyMVar mapMV $ \ mvmap ->
+      return (Map.delete key mvmap, Map.lookup key mvmap)
   answerResolve x result =
-    do mmv <- modifyMVar (circResolveWaiters circ) $ \ mvmap ->
-                return (Map.delete (relayStreamId x) mvmap,
-                        Map.lookup (relayStreamId x) mvmap)
+    do mmv <- getDeleteFromMap (circResolveWaiters circ) (relayStreamId x)
        case mmv of
          Nothing -> return ()
          Just mv -> putMVar mv result
@@ -247,6 +296,22 @@ backwardRelayHandler torst circ cell =
   continueExtend extdata =
     do ok <- tryPutMVar (circExtendWaiter circ) (Right extdata)
        unless ok $ destroyCircuit circ InternalError
+  --
+  destroyConnection x reason =
+   do mmv <- getDeleteFromMap (circConnectionWaiters circ) (relayStreamId x)
+      case mmv of
+        Nothing -> return ()
+        Just mv -> putMVar mv (Left reason)
+      _ <- getDeleteFromMap (circDataBuffers circ) (relayStreamId x)
+      return ()
+  --
+  finalizeConnect x =
+   do mmv <- getDeleteFromMap (circConnectionWaiters circ) (relayStreamId x)
+      case mmv of
+        Nothing -> return ()
+        Just mv ->
+          do res <- buildConnection circ (relayStreamId x)
+             putMVar mv (Right res)
   --
   decryptUntilClean :: ByteString -> [(EncryptionState, SHA1State)] ->
                        ([(EncryptionState, SHA1State)], Maybe RelayCell)
@@ -259,6 +324,41 @@ backwardRelayHandler torst circ cell =
            in ((encstate', h1) : rest', res)
          Right (_, _, (x, h1')) ->
            (((encstate', h1') : rest), Just x)
+
+-- -----------------------------------------------------------------------------
+
+buildConnection :: TorCircuit -> Word16 -> IO TorConnection
+buildConnection circ strmId =
+  do readTV <- newTVarIO BS.empty
+     modifyMVar_ (circDataBuffers circ) $ \ dbmap ->
+       return (Map.insert strmId readTV dbmap)
+     return TorConnection{
+              torRead  = readBytes readTV
+            , torWrite = writeBytes circ strmId
+            , torClose = closeConnection circ strmId
+            }
+
+readBytes :: TVar ByteString -> Int64 -> IO ByteString
+readBytes _      0   =
+  return BS.empty
+readBytes bstrTV amt =
+  do start <- atomically $ do buffer <- readTVar bstrTV
+                              when (BS.null buffer) retry
+                              let (res, rest) = BS.splitAt amt buffer
+                              writeTVar bstrTV rest
+                              return res
+     (start `BS.append`) <$> readBytes bstrTV (amt - BS.length start)
+
+writeBytes :: TorCircuit -> Word16 -> ByteString -> IO ()
+writeBytes circ strmId bstr
+  | BS.null bstr = return ()
+  | otherwise    =
+      do let (cur, rest) = BS.splitAt 503 bstr
+         writeCellOnCircuit circ (RelayData strmId cur)
+         writeBytes circ strmId rest
+
+closeConnection :: TorCircuit -> Word16 -> IO ()
+closeConnection c strmId = writeCellOnCircuit c (RelayEnd strmId ReasonDone)
 
 -- -----------------------------------------------------------------------------
 

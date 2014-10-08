@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveDataTypeable #-}
 module Tor.DataFormat.RelayCell(
          RelayCell(..),      putRelayCell,      getRelayCell
        ,                     parseRelayCell,    renderRelayCell
@@ -9,6 +10,7 @@ module Tor.DataFormat.RelayCell(
  where
 
 import Control.Applicative
+import Control.Exception
 import Control.Monad
 import Data.Attoparsec.ByteString.Lazy
 import Data.Binary.Get
@@ -18,6 +20,7 @@ import Data.ByteString.Lazy(ByteString)
 import qualified Data.ByteString.Lazy as BS
 import Data.ByteString.Lazy.Char8(pack,unpack)
 import Data.Digest.Pure.SHA1
+import Data.Typeable
 import Data.Word
 import Tor.DataFormat.Helpers(toString, ip4, ip6, char8, decimalNum)
 import Tor.DataFormat.TorAddress
@@ -377,7 +380,7 @@ parseAddrPort bstr =
 data RelayEndReason = ReasonMisc
                     | ReasonResolveFailed
                     | ReasonConnectionRefused
-                    | ReasonExitPolicy ByteString Word32
+                    | ReasonExitPolicy TorAddress Word32
                     | ReasonDestroyed
                     | ReasonDone
                     | ReasonTimeout
@@ -388,7 +391,9 @@ data RelayEndReason = ReasonMisc
                     | ReasonConnectionReset
                     | ReasonTorProtocol
                     | ReasonNotDirectory
- deriving (Eq, Show)
+ deriving (Eq, Show, Typeable)
+
+instance Exception RelayEndReason
 
 getRelayEndReason :: Word16 -> Get RelayEndReason
 getRelayEndReason len =
@@ -398,10 +403,10 @@ getRelayEndReason len =
        2  -> return ReasonResolveFailed
        3  -> return ReasonConnectionRefused
        -- FIXME: Turn these into better data structures.
-       4 | len == 9  -> do addr <- getLazyByteString 4
+       4 | len == 9  -> do addr <- (IP4 . ip4ToString) <$> getLazyByteString 4
                            ttl  <- getWord32be
                            return (ReasonExitPolicy addr ttl)
-         | len == 21 -> do addr <- getLazyByteString 16
+         | len == 21 -> do addr <- (IP6 . ip6ToString) <$> getLazyByteString 16
                            ttl <- getWord32be
                            return (ReasonExitPolicy addr ttl)
          | otherwise -> fail ("Bad length for REASON_EXITPOLICY: " ++ show len)
@@ -422,8 +427,7 @@ putRelayEndReason ReasonMisc              = putWord8 1
 putRelayEndReason ReasonResolveFailed     = putWord8 2
 putRelayEndReason ReasonConnectionRefused = putWord8 3
 putRelayEndReason (ReasonExitPolicy a t)  =
-  do putWord8 4
-     putLazyByteString a
+  do putLazyByteString (BS.drop 1 (runPut (putTorAddress a)))
      putWord32be t
 putRelayEndReason ReasonDestroyed             = putWord8 5
 putRelayEndReason ReasonDone                = putWord8 6

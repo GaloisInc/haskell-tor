@@ -224,7 +224,6 @@ getRespInitialMsgs tls =
            return (acc `BS.append` accchunk, leftover, a, b) 
       Partial next     ->
         do b <- readTLS tls
-           putStrLn ("read " ++ show (BS.length b) ++ " bytes")
            let getter' = next (Just (BS.toStrict b))
            getBaseCells getter' b (acc `BS.append` lastBS)
   --

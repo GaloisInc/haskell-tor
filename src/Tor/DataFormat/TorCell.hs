@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveDataTypeable #-}
 module Tor.DataFormat.TorCell(
          TorCell(..),       putTorCell,       getTorCell
        , DestroyReason(..), putDestroyReason, getDestroyReason
@@ -7,11 +8,13 @@ module Tor.DataFormat.TorCell(
  where
 
 import Control.Applicative
+import Control.Exception
 import Control.Monad
 import Data.Binary.Get
 import Data.Binary.Put
 import Data.ByteString.Lazy(ByteString)
 import qualified Data.ByteString.Lazy as BS
+import Data.Typeable
 import Data.X509
 import Data.Word
 import Tor.DataFormat.TorAddress
@@ -225,7 +228,9 @@ data DestroyReason = NoReason
                    | CircuitDestroyed
                    | NoSuchService
                    | UnknownDestroyReason Word8
- deriving (Eq, Show)
+ deriving (Eq, Show, Typeable)
+
+instance Exception DestroyReason
 
 getDestroyReason :: Get DestroyReason
 getDestroyReason =

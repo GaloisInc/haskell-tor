@@ -1,12 +1,14 @@
 import Control.Concurrent(forkIO,threadDelay)
 import Control.Exception
 import Control.Monad
+import Data.ByteString.Lazy.Char8(pack)
 import Data.List
 import Data.Time
 import Data.Word
 import Network.Socket hiding (recv)
 import System.IO
 import System.Locale
+import Tor.DataFormat.TorAddress
 import Tor.Circuit
 import Tor.DataFormat.TorCell
 import Tor.NetworkStack.System
@@ -54,12 +56,32 @@ buildCircularCircuit torState = catch tryCircular notPublic
        midRouter  <- getRouter torState [NotRouter initRouter]
        putStrLn ("Extending router to " ++ routerIPv4Address midRouter)
        ()         <- throwLeft =<< extendCircuit torState circ midRouter
-       myDesc     <- getRouter torState [NotRouter initRouter, NotRouter midRouter]
-       putStrLn ("Extending router to " ++ routerIPv4Address myDesc)
-       ()         <- throwLeft =<< extendCircuit torState circ myDesc
-       nms        <- resolveName circ "google.com"
-       putStrLn ("Resolved google.com to " ++ show nms)
+       lastRouter <- getRouter torState [NotRouter initRouter,
+                                         NotRouter midRouter,
+                                         NotTorAddr (IP4 "37.49.35.221"),
+                                         NotTorAddr (IP4 "62.210.74.143"),
+                                         NotTorAddr (IP4 "162.248.160.151"),
+                                         NotTorAddr (IP4 "109.235.50.163"),
+                                         ExitNodeAllowing (IP4 "66.193.37.213") 80]
+       putStrLn ("Extending router to " ++ routerIPv4Address lastRouter)
+       ()         <- throwLeft =<< extendCircuit torState circ lastRouter
+       nms        <- resolveName circ "galois.com"
+       putStrLn ("Resolved galois.com to " ++ show nms)
+       putStrLn ("Exit rules: " ++ show (routerExitRules lastRouter))
+       con        <- connectToHost circ (Hostname "uhsure.com") 80
+       putStrLn ("Built connection to Galois!")
+       torWrite con (buildGet "http://uhsure.com/")
+       putStrLn ("Wrote GET")
+       resp <- torRead con 300
+       putStrLn ("Got response: " ++ show resp)
        destroyCircuit circ NoReason
+  --
+  buildGet str = result
+   where
+    result      = pack (requestLine ++ userAgent ++ crlf)
+    requestLine = "GET " ++ str ++ " HTTP/1.0\r\n"
+    userAgent   = "User-Agent: CERN-LineMode/2.15 libwww/2.17b3\r\n"
+    crlf        = "\r\n"
 
 
 main :: IO ()
