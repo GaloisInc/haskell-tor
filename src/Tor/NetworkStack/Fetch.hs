@@ -8,13 +8,17 @@ module Tor.NetworkStack.Fetch(
 
 import Codec.Compression.Zlib
 import Control.Exception
-import Data.Attoparsec.ByteString.Lazy
-import Data.ByteString.Lazy(ByteString)
-import qualified Data.ByteString.Lazy as BS
+import Crypto.Hash.Easy
+import Crypto.PubKey.RSA.KeyHash
+import Data.Attoparsec.ByteString
+import Data.ByteString(ByteString)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as L
 import Data.ByteString.Lazy.Char8(pack)
 import Data.Either
+import Data.Map(Map)
+import qualified Data.Map as Map
 import Data.Word
-import Hexdump
 import Tor.DataFormat.Consensus
 import Tor.DataFormat.DirCertInfo
 import Tor.DataFormat.Helpers
@@ -31,21 +35,23 @@ instance Fetchable DirectoryCertInfo where
 instance Fetchable (Consensus, ByteString, ByteString) where
   parseBlob = parseConsensusDocument
 
-instance Fetchable [RouterDesc] where
-  parseBlob bstr =
-    case partitionEithers (parseDirectory bstr) of
-      ([],    xs) -> Right xs
-      ((e:_), _)  -> Left e
+instance Fetchable (Map ByteString RouterDesc) where
+  parseBlob bstr = Right (convertEntries Map.empty xs)
+   where
+    (_, xs) = partitionEithers (parseDirectory bstr)
+    --
+    convertEntries m []    = m
+    convertEntries m (d:r) =
+      convertEntries (Map.insert (keyHash' sha1 (routerSigningKey d)) d m) r
 
 data FetchItem = ConsensusDocument
                | KeyCertificate
-               | Descriptor ByteString
+               | Descriptors
 
 instance Show FetchItem where
   show ConsensusDocument = "/tor/status-vote/current/consensus.z"
   show KeyCertificate    = "/tor/keys/authority.z"
-  show (Descriptor x)    = "/tor/server/d/" ++ (encode x) ++ ".z"
-   where encode = filter (/= ' ') . simpleHex . BS.toStrict
+  show Descriptors       = "/tor/server/all.z"
 
 fetch :: Fetchable a => 
          TorNetworkStack ls s ->
@@ -62,11 +68,11 @@ fetch ns host tcpport item =
               case resp of
                 Left err   -> return (Left err)
                 Right body ->
-                  case decompress body of
+                  case decompress (L.fromStrict body) of
                     Nothing    -> return (Left "Decompression failure.")
-                    Just body' -> return (parseBlob body')
+                    Just body' -> return (parseBlob (L.toStrict body'))
 
-buildGet :: String -> ByteString
+buildGet :: String -> L.ByteString
 buildGet str = result
  where
   result      = pack (requestLine ++ userAgent ++ crlf)
@@ -79,13 +85,20 @@ readResponse ns sock = finally getResponse (close ns sock)
  where
   getResponse =
     do response <- recvAll ns sock
-       case parse httpResponse response of
-         Fail bstr _ err ->
-           do let start = show (BS.take 10 bstr)
-                  msg = "Parser error: " ++ err ++ " [" ++ start ++ "]"
-              return (Left msg)
-         Done _ res ->
-           return res
+       case parse httpResponse (L.toStrict response) of
+         Partial f ->
+           handleParseResult (f BS.empty)
+         x ->
+           handleParseResult x
+  --
+  handleParseResult (Fail bstr _ err) =
+    do let start = show (BS.take 10 bstr)
+           msg = "Parser error: " ++ err ++ " [" ++ start ++ "]"
+       return (Left msg)
+  handleParseResult (Partial _) =
+    return (Left "Partial response received from other side.")
+  handleParseResult (Done _ res) =
+    return res
 
 httpResponse :: Parser (Either String ByteString)
 httpResponse =
@@ -102,7 +115,7 @@ httpResponse =
         then return (Left ("HTTP Error: " ++ msg))
         else do _   <- many1 keyval
                 _   <- crlf
-                Right `fmap` takeLazyByteString
+                Right `fmap` takeByteString
  where
   crlf = char8 '\r' >> char8 '\n'
   keyval =

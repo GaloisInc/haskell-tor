@@ -1,12 +1,16 @@
 module Tor.NetworkStack.System(systemNetworkStack) where
 
-import Data.ByteString.Lazy(ByteString)
-import qualified Data.ByteString.Lazy as BS
+import Data.Binary.Put
+import Data.ByteString(ByteString)
+import Data.ByteString.Lazy(toStrict)
+import qualified Data.ByteString as BS
 import Data.Word
+import Network(listenOn, PortID(..))
 import Network.BSD
 import Network.Socket as Sys hiding (recv)
 import Network.Socket.ByteString.Lazy(sendAll)
-import qualified Network.Socket.ByteString.Lazy as Sys
+import qualified Network.Socket.ByteString as Sys
+import Tor.DataFormat.TorAddress
 import Tor.NetworkStack
 
 systemNetworkStack :: TorNetworkStack Socket Socket
@@ -35,16 +39,20 @@ systemConnect addrStr port =
             return (Just sock)
 
 systemListen :: Word16 -> IO Socket
-systemListen port =
-  do sock <- socket AF_INET Stream defaultProtocol
-     bind sock (SockAddrInet (PortNum port) iNADDR_ANY)
-     Sys.listen sock 3
-     return sock
+systemListen port = listenOn (PortNumber (fromIntegral port))
 
-systemAccept :: Socket -> IO (Socket, String)
+systemAccept :: Socket -> IO (Socket, TorAddress)
 systemAccept lsock =
   do (res, addr) <- Sys.accept lsock
-     return (res, show addr)
+     case addr of
+       SockAddrInet _ addr' ->
+         let bstr = toStrict (runPut (putWord32be addr'))
+         in return (res, IP4 (ip4ToString bstr))
+       SockAddrInet6 _ _ (a,b,c,d) _ ->
+         let bstr = toStrict (runPut (mapM_ putWord32be [a,b,c,d]))
+         in return (res, IP6 (ip6ToString bstr))
+       SockAddrUnix  _          -> fail "Unix socket? BAD."
+       SockAddrCan   _          -> fail "CAN socket? BAD."
 
 systemRead :: Socket -> Int -> IO ByteString
 systemRead _    0   = return BS.empty

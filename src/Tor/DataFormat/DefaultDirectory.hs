@@ -6,8 +6,8 @@ module Tor.DataFormat.DefaultDirectory(
        )
  where
 
-import Data.Attoparsec.ByteString.Lazy
-import Data.ByteString.Lazy(ByteString)
+import Data.Attoparsec.ByteString
+import Data.ByteString(ByteString)
 import Data.Word
 import Tor.DataFormat.Helpers
 
@@ -22,10 +22,12 @@ data DefaultDirectory = DefaultDirectory {
      }
  deriving (Show)
 
+-- FIXME: Make this handle partial input
 parseDefaultDirectory :: ByteString -> Either String DefaultDirectory
 parseDefaultDirectory bstr =
   case parse defaultDirectory bstr of
     Fail _ _ err -> Left err
+    Partial _    -> Left "Incomplete default directory!"
     Done _   res -> Right res
 
 defaultDirectory :: Parser DefaultDirectory

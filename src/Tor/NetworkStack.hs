@@ -1,45 +1,51 @@
 module Tor.NetworkStack(
          TorNetworkStack(..)
-       , toIOSystem
+       , toBackend
        , recvAll
        , recvLine
        )
  where
 
-import Data.ByteString.Lazy(ByteString)
-import qualified Data.ByteString.Lazy as BS
+import qualified Data.ByteString      as S
+import qualified Data.ByteString.Lazy as L
 import Data.Word
-import TLS.Context
+import Network.TLS
+import Tor.DataFormat.TorAddress
 
 data TorNetworkStack lsock sock = TorNetworkStack {
-       connect :: String -> Word16     -> IO (Maybe sock)
-     , listen  :: Word16               -> IO lsock
-     , accept  :: lsock                -> IO (sock, String)
-     , recv    :: sock   -> Int        -> IO ByteString
-     , write   :: sock   -> ByteString -> IO ()
-     , flush   :: sock                 -> IO ()
-     , close   :: sock                 -> IO ()
-     , lclose  :: lsock                -> IO ()
+       connect :: String -> Word16       -> IO (Maybe sock)
+     , listen  :: Word16                 -> IO lsock
+     , accept  :: lsock                  -> IO (sock, TorAddress)
+     , recv    :: sock   -> Int          -> IO S.ByteString
+     , write   :: sock   -> L.ByteString -> IO ()
+     , flush   :: sock                   -> IO ()
+     , close   :: sock                   -> IO ()
+     , lclose  :: lsock                  -> IO ()
      }
 
-recvLine :: TorNetworkStack ls s -> s -> IO ByteString
-recvLine ns s =
-  do next <- recv ns s 1
-     case BS.uncons next of
-       Nothing      -> return BS.empty
-       Just (10, _) -> return next
-       Just (f, _)  -> BS.cons f `fmap` recvLine ns s
+recvLine :: TorNetworkStack ls s -> s -> IO L.ByteString
+recvLine ns s = go []
+ where
+  go acc =
+    do next <- recv ns s 1
+       case S.uncons next of
+         Nothing      -> return (L.pack (reverse acc))
+         Just (10, _) -> return (L.pack (reverse acc))
+         Just (f, _)  -> go (f:acc)
 
-recvAll :: TorNetworkStack ls s -> s -> IO ByteString
-recvAll ns s =
-  do next <- recv ns s 4096
-     if BS.null next
-        then return next
-        else (next `BS.append`) `fmap` recvAll ns s
+recvAll :: TorNetworkStack ls s -> s -> IO L.ByteString
+recvAll ns s = go []
+ where
+  go acc =
+    do next <- recv ns s 4096
+       if S.null next
+          then return (L.fromChunks (reverse acc))
+          else go (next:acc)
 
-toIOSystem :: TorNetworkStack ls s -> s -> IOSystem
-toIOSystem ns s = IOSystem {
-    ioRead  = recv ns s
-  , ioWrite = write ns s
-  , ioFlush = flush ns s
+toBackend :: TorNetworkStack ls s -> s -> Backend
+toBackend ns s = Backend {
+    backendFlush = flush ns s
+  , backendClose = close ns s
+  , backendRecv  = recv  ns s
+  , backendSend  = write ns s . L.fromStrict
   }

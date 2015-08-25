@@ -2,70 +2,106 @@ module Tor.Circuit(
          createCircuit
        , extendCircuit
        , destroyCircuit
+       --
+       , buildRelay
+       , buildRelayFast
+       --
+       , TorConnection(..)
+       , resolveName
+       , connectToHost
+       , connectToHost'
        )
  where
 
-import Codec.Crypto.RSA.Pure
 import Control.Applicative
 import Control.Concurrent.MVar
 import Control.Concurrent.STM
 import Control.Exception
 import Control.Monad
-import Crypto.Cipher.AES128
+import Crypto.Cipher.AES
+import Crypto.Cipher.Types
+import Crypto.Error
+import Crypto.Hash hiding (hash)
+import Crypto.Hash.Easy
+import Crypto.Number.Serialize
+import Crypto.PubKey.DH
+import Crypto.PubKey.RSA.KeyHash
+import Crypto.Random
 import Data.Binary.Get
 import Data.Bits
-import Data.ByteString.Lazy(ByteString)
-import qualified Data.ByteString.Lazy as BS
-import Data.Digest.Pure.SHA
-import Data.Digest.Pure.SHA1
+import Data.ByteString(ByteString)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BSL
+import Data.Map.Strict(Map)
+import qualified Data.Map.Strict as Map
 import Data.Word
-import TLS.Certificate
-import TLS.DiffieHellman
+import Data.X509
+import Network.TLS(HasBackend)
 import Tor.DataFormat.RelayCell
 import Tor.DataFormat.TorAddress
 import Tor.DataFormat.TorCell
 import Tor.HybridCrypto
-import Tor.Link
+import {-# SOURCE #-} Tor.Link
+import Tor.Link.DH
+import Tor.RNG
 import Tor.RouterDesc
 import Tor.State
 
 -- -----------------------------------------------------------------------------
 
-data TorCircuit = TorCircuit {
-       circForwardLink        :: TorLink
-     , circCircuitId          :: Word32
-     , circExtendWaiter       :: MVar (Either DestroyReason ByteString)
-     , circForwardCryptoData  :: MVar ([SHA1State], [EncryptionState], Word64)
-     , circBackwardCryptoData :: MVar ([SHA1State], [EncryptionState])
-     }
+type ConnectionResp = Either RelayEndReason TorConnection
+
+data TorEntrance = TorEntrance {
+      circForwardLink        :: TorLink
+    , circCircuitId          :: Word32
+    , circNextStreamId       :: MVar Word16
+    , circExtendWaiter       :: MVar (Either DestroyReason ByteString)
+    , circResolveWaiters     :: MVar (Map Word16 (MVar [(TorAddress, Word32)]))
+    , circConnectionWaiters  :: MVar (Map Word16 (MVar ConnectionResp))
+    , circDataBuffers        :: MVar (Map Word16 (TVar ByteString))
+    , circForwardCryptoData  :: MVar [(EncryptionState, Context SHA1)]
+    , circBackwardCryptoData :: MVar [(EncryptionState, Context SHA1)]
+    }
+
+data ForwardState = ForwardLink {
+                      flLink                :: TorLink
+                    , flCircuitId           :: Word32
+                    }
+                  | ForwardExtending {
+                    }
+                  | ForwardExit {
+                    }
+                  | ForwardDeadEnd
+
+
+data TorRelay = TorRelay {
+      relayBackwardLink        :: TorLink
+    , relayBackwardCircId      :: Word32
+    , relayForwardCryptoData   :: MVar (EncryptionState, Context SHA1)
+    , _relayBackwardCryptoData :: MVar (EncryptionState, Context SHA1)
+    , relayForwardStates       :: MVar ForwardState
+    }
 
 -- Send a cell downstream in the circuit, in the cirection of the CREATE
 -- request, away from the originator of the circuit. If there is no downstream
 -- (i.e., we're the exit node), then this triggers the destruction of the
 -- circuit.
--- circSendDownstream :: TorCircuit -> TorCell -> IO ()
+-- circSendDownstream :: TorEntrance -> TorCell -> IO ()
 -- circSendDownstream = error "circSendDownstream"
 
 -- Send a cell upstream in the circuit, towards the originator of the circuit.
 -- If there is no upstream circuit (i.e., we're the origination point), then
 -- this triggers the destruction of the circuit.
-circSendUpstream :: TorCircuit -> TorCell -> IO ()
+circSendUpstream :: TorEntrance -> TorCell -> IO ()
 circSendUpstream _ _ =
   do putStrLn "WARNING: circSendUpstream"
      return ()
 
--- Destroy the circuit, sending the given reason upstream.
-destroyCircuit :: TorCircuit -> DestroyReason -> IO ()
-destroyCircuit circ reason =
-  do _ <- tryPutMVar (circExtendWaiter circ) (Left reason)
-     let circId = circCircuitId circ
-         link   = circForwardLink circ
-     writeCell link (Destroy circId reason)
-     endCircuit link circId
-
 -- -----------------------------------------------------------------------------
 
-createCircuit :: TorState ls s -> RouterDesc -> IO (Either String TorCircuit)
+createCircuit :: HasBackend s =>
+                 TorState ls s -> RouterDesc ->
+                 IO (Either String TorEntrance)
 createCircuit torst firstRouter =
   handle (\ e -> return (Left (show (e :: SomeException)))) $
     do link <- failLeft <$> initializeClientTorLink torst firstRouter
@@ -73,27 +109,36 @@ createCircuit torst firstRouter =
        let initHand = createHandler link waitMV
        circId <- atomically $ withRNGSTM torst (newRandomCircuit link initHand)
        x <- withRNG torst generateLocal'
-       let gx = computePublicValue oakley2 x
-           Right gxBS = i2osp gx 128
+       let PublicNumber gx = calculatePublic oakley2 x
+           gxBS = i2ospOf_ 128 gx
        let nodePub = routerOnionKey firstRouter
-       egx <- withRNG torst (hybridEncrypt True nodePub gxBS)
+       egx <- hybridEncrypt True nodePub gxBS
        writeCell link (Create circId egx)
        initres <- takeMVar waitMV
-       case initres of
-         Left destReason ->
-           return (Left ("Could not create initial link: " ++ show destReason))
-         Right rbstr ->
-              -- FIXME: Should be checking for degenerate cases.
-           do let (ok, keyf, fhash, keyb, bhash) = completeTAPHandshake x rbstr
-              if ok
-                 then do fcdMV   <- newMVar ([fhash], [keyf], 0)
-                         bcdMV   <- newMVar ([bhash], [keyb])
-                         ewMV    <- newEmptyMVar
-                         let circ = TorCircuit link circId ewMV fcdMV bcdMV
-                             handler' = backwardRelayHandler torst circ
-                         modifyCircuitHandler link circId handler'
-                         return (Right circ)
-                 else return (Left "Key agreement failure.")
+       case completeTAPHandshake x initres of
+         Left err -> return (Left err)
+         Right (fencstate, bencstate) ->
+           do fencMV <- newMVar [fencstate]
+              bencMV <- newMVar [bencstate]
+              strmMV <- newMVar 1
+              ewMV   <- newEmptyMVar
+              rsvMV  <- newMVar Map.empty
+              conMV  <- newMVar Map.empty
+              dbfMV  <- newMVar Map.empty
+              let circ = TorEntrance {
+                           circForwardLink        = link
+                         , circCircuitId          = circId
+                         , circNextStreamId       = strmMV
+                         , circExtendWaiter       = ewMV
+                         , circResolveWaiters     = rsvMV
+                         , circConnectionWaiters  = conMV
+                         , circDataBuffers        = dbfMV
+                         , circForwardCryptoData  = fencMV
+                         , circBackwardCryptoData = bencMV
+                         }
+                  handler' = backwardRelayHandler torst circ
+              modifyCircuitHandler link circId handler'
+              return (Right circ)
  where
   failLeft (Left str) = error str
   failLeft (Right x)  = x
@@ -116,32 +161,23 @@ createCircuit torst firstRouter =
                       "for CREATED: " ++ show cell)
 
 -- |Given a circuit, extend the end to the given router.
-extendCircuit :: TorState ls s -> TorCircuit -> RouterDesc ->
+extendCircuit :: TorState ls s -> TorEntrance -> RouterDesc ->
                  IO (Either String ())
 extendCircuit torst circ nextRouter =
   do x <- withRNG torst generateLocal'
-     let gx = computePublicValue oakley2 x
-         Right gxBS = i2osp gx 128
-     egx <- withRNG torst (hybridEncrypt True (routerOnionKey nextRouter) gxBS)
+     let PublicNumber gx = calculatePublic oakley2 x
+         gxBS = i2ospOf_ 128 gx
+     egx <- hybridEncrypt True (routerOnionKey nextRouter) gxBS
      writeCellOnCircuit circ (extendCell egx)
      res <- takeMVar (circExtendWaiter circ)
-     case res of
-       Left drsn ->
-         return (Left (show drsn))
-       Right rbstr ->
-         do let (ok, keyf, fhash, keyb, bhash) = completeTAPHandshake x rbstr
-            if ok
-               then do (fhs, fks, cntr) <- takeMVar (circForwardCryptoData circ)
-                       let fhs' = fhash : fhs -- fhs ++ [fhash]
-                           fks' = keyf : fks -- fks ++ [keyf]
-                       (bhs, bks) <- takeMVar (circBackwardCryptoData circ)
-                       let bhs' = bhs ++ [bhash]
-                           bks' = bks ++ [keyb]
-                       putMVar (circForwardCryptoData circ)  (fhs', fks', cntr)
-                       putMVar (circBackwardCryptoData circ) (bhs', bks')
-                       logMsg torst ("Extended circuit to " ++ routerIPv4Address nextRouter)
-                       return (Right ())
-               else return (Left "Key agreement failure.")
+     case completeTAPHandshake x res of
+       Left err -> return (Left err)
+       Right (fencstate, bencstate) ->
+         do modifyMVar_ (circForwardCryptoData circ) $ \ rest ->
+              return (rest ++ [fencstate])
+            modifyMVar_ (circBackwardCryptoData circ) $ \ rest ->
+              return (rest ++ [bencstate])
+            return (Right ())
  where
   extendCell skin = RelayExtend {
       relayStreamId      = 0
@@ -153,76 +189,195 @@ extendCircuit torst circ nextRouter =
 
 -- -----------------------------------------------------------------------------
 
-writeCellOnCircuit :: TorCircuit -> RelayCell -> IO ()
-writeCellOnCircuit circ relay =
-  do (sha1ss, keys, cellCount) <- takeMVar (circForwardCryptoData circ)
-     let (lastState:restStates) = sha1ss
-         (bstr,lastState')      = renderRelayCell lastState relay
-         (encbstr, keys')       = encryptWithKeys bstr keys
-         builder                = pickBuilder relay
-     writeCell (circForwardLink circ) (builder (circCircuitId circ) encbstr)
-     let sha1ss' = lastState' : restStates
-     putMVar (circForwardCryptoData circ) (sha1ss', keys', cellCount + 1)
+buildRelay :: TorState ls s -> TorLink -> Word32 -> ByteString -> IO ()
+buildRelay torst link circId egx = catch buildInCircuit' internalError
  where
+  buildInCircuit' =
+    do (_, PrivKeyRSA nodePriv) <- getOnionCredentials torst
+       gxBS                     <- hybridDecrypt nodePriv egx
+       y                        <- withRNG torst generateLocal'
+       let gx              = PublicNumber (os2ip gxBS)
+           PublicNumber gy = calculatePublic oakley2 y
+           gyBS            = i2ospOf_ 128 gy
+           (kh, f, b)      = computeTAPValues y gx
+           resp            = gyBS `BS.append` kh
+       fMV  <- newMVar f
+       bMV  <- newMVar b
+       flMV <- newMVar ForwardDeadEnd
+       let relay = TorRelay link circId fMV bMV flMV
+       modifyCircuitHandler link circId (forwardRelayHandler torst relay)
+       writeCell link (Created circId resp)
+  --
+  internalError :: SomeException -> IO ()
+  internalError e =
+    do logMsg torst ("Internal error building circuit: " ++ show e)
+       writeCell link (Destroy circId InternalError)
+
+buildRelayFast :: TorState ls s -> TorLink -> Word32 -> ByteString -> IO ()
+buildRelayFast = error "FIXME: buildRelayFast"
+
+-- -----------------------------------------------------------------------------
+
+-- Destroy the circuit, sending the given reason upstream.
+destroyCircuit :: TorEntrance -> DestroyReason -> IO ()
+destroyCircuit circ reason =
+  do _ <- tryPutMVar (circExtendWaiter circ) (Left reason)
+     let circId = circCircuitId circ
+         link   = circForwardLink circ
+     writeCell link (Destroy circId reason)
+     endCircuit link circId
+
+-- -----------------------------------------------------------------------------
+
+data TorConnection = TorConnection {
+       torWrite :: ByteString -> IO ()
+     , torRead  :: Int -> IO ByteString
+     , torClose :: IO ()
+     }
+
+-- |Resolve the given name anonymously on the given circuit. In some cases,
+-- you may receive error values amongst the responses. The Word32 provided with
+-- each response is a TTL for that response.
+resolveName :: TorEntrance -> String -> IO [(TorAddress, Word32)]
+resolveName circ str =
+  do strmId <- getNextStreamId circ
+     resMV  <- newEmptyMVar
+     modifyMVar_ (circResolveWaiters circ) $ \ m ->
+       return (Map.insert strmId resMV m)
+     writeCellOnCircuit circ (RelayResolve strmId str)
+     takeMVar resMV
+
+-- |Connect to the given address and port through the given circuit. The result
+-- is a connection that can be used to read, write, and close the connection.
+-- (This is equivalent to calling connectToHost' with True, True, and False for
+-- the extra arguments.
+connectToHost :: TorEntrance -> TorAddress -> Word16 -> IO TorConnection
+connectToHost tc a p = connectToHost' tc a p True True False
+
+-- |Connect to the given address and port through the given circuit. The result
+-- is a connection that can be used to read, write, and close the connection.
+-- The booleans determine if an IPv4 connection is OK, an IPv6 connection is OK,
+-- and whether IPv6 is preferred, respectively.
+connectToHost' :: TorEntrance ->
+                  TorAddress -> Word16 ->
+                  Bool -> Bool -> Bool ->
+                  IO TorConnection
+connectToHost' circ addr port ip4ok ip6ok ip6pref =
+  do strmId <- getNextStreamId circ
+     resMV  <- newEmptyMVar
+     modifyMVar_ (circConnectionWaiters circ) $ \ m ->
+       return (Map.insert strmId resMV m)
+     writeCellOnCircuit circ (RelayBegin strmId addr port ip4ok ip6ok ip6pref)
+     throwLeft =<< takeMVar resMV
+ where
+  throwLeft (Left a)  = throwIO a
+  throwLeft (Right x) = return x
+
+-- -----------------------------------------------------------------------------
+
+writeCellOnCircuit :: TorEntrance -> RelayCell -> IO ()
+writeCellOnCircuit circ relay =
+  do keysnhashes <- takeMVar (circForwardCryptoData circ)
+     let (cell, keysnhashes') = synthesizeRelay keysnhashes
+         circId               = circCircuitId circ
+     writeCell (circForwardLink circ) (pickBuilder relay circId cell)
+     putMVar (circForwardCryptoData circ) keysnhashes'
+ where
+  synthesizeRelay [] = error "synthesizeRelay reached empty list?!"
+  synthesizeRelay [(estate, hash)] =
+    let (bstr, hash')      = renderRelayCell hash relay
+        (encbstr, estate') = encryptData estate bstr
+    in (encbstr, [(estate', hash')])
+  synthesizeRelay ((estate, hash) : rest) =
+    let (bstr, rest')      = synthesizeRelay rest
+        (encbstr, estate') = encryptData estate bstr
+    in (encbstr, (estate', hash) : rest')
+  --
   pickBuilder RelayExtend{}  = RelayEarly
   pickBuilder RelayExtend2{} = RelayEarly
   pickBuilder _              = RelayEarly
-  --
-  encryptWithKeys bstr [] = (bstr, [])
-  encryptWithKeys bstr (encstate:rstates) =
-    let (bstr', encstate') = encryptData encstate bstr
-        (res,   rstates')  = encryptWithKeys bstr' rstates
-    in (res, encstate' : rstates') 
+
+getNextStreamId :: TorEntrance -> IO Word16
+getNextStreamId circ = modifyMVar (circNextStreamId circ) $ \ x ->
+  return (x + 1, x)
 
 -- -----------------------------------------------------------------------------
 
 -- This handler is called when we receive data from an earlier link in the
 -- circuit. Thus, traffic we receive is moving forward through the network.
--- forwardRelayHandler :: TorState ls s -> TorCircuit -> TorCell -> IO ()
--- forwardRelayHandler torst circ cell = error "forwardRelayHandler"
+forwardRelayHandler :: TorState ls s -> TorRelay -> TorCell -> IO ()
+forwardRelayHandler torst circ cell =
+  case cell of
+    Relay _ body      -> forwardRelay Relay      body
+    RelayEarly _ body -> forwardRelay RelayEarly body
+    Destroy _ reason  -> logMsg torst ("Relay destroyed: " ++ show reason)
+    _                 -> logMsg torst ("Spurious message across relay.")
+ where
+  forwardRelay builder body =
+    do (encstate, hashstate) <- takeMVar (relayForwardCryptoData circ)
+       let (body', encstate') = decryptData encstate body
+       case runGetOrFail (parseRelayCell hashstate) (BSL.fromStrict body') of
+         Left _ ->
+           do putMVar (relayForwardCryptoData circ) (encstate', hashstate)
+              forward builder body'
+         Right (_, _, (x, hashstate')) ->
+           do putMVar (relayForwardCryptoData circ) (encstate', hashstate')
+              process x
+  --
+  forward builder bstr =
+    do fstate <- takeMVar (relayForwardStates circ)
+       case fstate of
+         ForwardLink{} ->
+            do writeCell (flLink fstate) (builder (flCircuitId fstate) bstr)
+               putMVar (relayForwardStates circ) fstate
+         ForwardExtending{} ->
+            do putMVar (relayForwardStates circ) ForwardDeadEnd
+               let dst = Destroy (relayBackwardCircId circ) TorProtocolViolation
+               writeCell (relayBackwardLink circ) dst
+               endCircuit (relayBackwardLink circ) (relayBackwardCircId circ)
+         ForwardExit{} ->
+            do putMVar (relayForwardStates circ) ForwardDeadEnd
+               let dst = Destroy (relayBackwardCircId circ) TorProtocolViolation
+               writeCell (relayBackwardLink circ) dst
+               endCircuit (relayBackwardLink circ) (relayBackwardCircId circ)
+         ForwardDeadEnd ->
+            return ()
+  --
+  process RelayBegin{}    = putStrLn "RELAY_BEGIN"
+  process RelayData{}     = putStrLn "RELAY_DATA"
+  process RelayEnd{}      = putStrLn "RELAY_END"
+  process RelayExtend{}   = putStrLn "RELAY_DATA"
+  process RelayTruncate{} = putStrLn "RELAY_TRUNCATE"
+  process RelayDrop{}     = putStrLn "RELAY_DROP"
+  process RelayResolve{}  = putStrLn "RELAY_RESOLVE"
+  process RelayExtend2{}  = putStrLn "RELAY_EXTEND2"
+  process _               = return ()
 
 -- This handler is called when we receive data from the next link in the
 -- circuit. Thus, traffic we receive is moving backwards through the network.
-backwardRelayHandler :: TorState ls s -> TorCircuit ->
+backwardRelayHandler :: TorState ls s -> TorEntrance ->
                         TorCell -> IO ()
 backwardRelayHandler torst circ cell =
   case cell of
     Relay cnum body ->
-      do (hashes, keys) <- takeMVar (circBackwardCryptoData circ)
-         (keys', hashes', res) <- decryptUntilClean body keys hashes
-         putMVar (circBackwardCryptoData circ) (hashes', keys')
+      do keysnhashes <- takeMVar (circBackwardCryptoData circ)
+         let (keysnhashes', res) = decryptUntilClean body keysnhashes
+         putMVar (circBackwardCryptoData circ) keysnhashes'
          case res of
-           Nothing ->
-             do logMsg torst ("Relay destined for upstream consumer.")
-                BS.writeFile "testblob" body
-                circSendUpstream circ (Relay cnum body)
+           Nothing -> circSendUpstream circ (Relay cnum body)
            Just x ->
-               case x of
-                 RelayData{} ->
-                   logMsg torst ("Recieved (B) RELAY_DATA")
-                 RelayEnd{} ->
-                   logMsg torst ("Recieved (B) RELAY_END")
-                 RelayConnected{} ->
-                   logMsg torst ("Received (B) RELAY_CONNECTED")
-                 RelaySendMe{} ->
-                   logMsg torst ("Received (B) RELAY_SENDME")
-                 RelayExtended{} ->
-                   do ok <- tryPutMVar (circExtendWaiter circ)
-                                       (Right (relayExtendedData x))
-                      unless ok $
-                        do destroyCircuit circ InternalError
-                           logMsg torst ("Received RELAY_EXTENDED but not " ++
-                                         "extending relay.")
-                 RelayTruncated{} ->
-                   logMsg torst ("Received (B) RELAY_TRUNCATED: " ++ show (relayTruncatedRsn x))
-                 RelayDrop{} ->
-                   logMsg torst ("Received (B) RELAY_DROP")
-                 RelayResolved{} ->
-                   logMsg torst ("Received (B) RELAY_RESOLVED")
-                 RelayExtended2{} ->
-                   logMsg torst ("Received (B) RELAY_EXTENDED2")
-                 _ ->
-                   logMsg torst ("Weird message on backward stream: " ++show x)
+             case x of
+               RelayData{}      -> addDataBlock x (relayData x)
+               RelayEnd{}       -> do destroyConnection x    (relayEndReason x)
+                                      destroyCircuit    circ CircuitDestroyed
+               RelayConnected{} -> finalizeConnect x
+               RelaySendMe{}    -> logMsg torst ("Received (B) RELAY_SENDME")
+               RelayExtended{}  -> continueExtend (relayExtendedData x)
+               RelayTruncated{} -> answerResolve x []
+               RelayDrop{}      -> return ()
+               RelayResolved{}  -> answerResolve x (relayResolvedAddrs x)
+               RelayExtended2{} -> return () -- FIXME
+               _                -> return ()
     RelayEarly cnum body ->
       -- Treat RelayEarly as Relay. This could be a problem. FIXME?
       backwardRelayHandler torst circ (Relay cnum body)
@@ -231,82 +386,151 @@ backwardRelayHandler torst circ cell =
          destroyCircuit circ reason
     _ ->
       logMsg torst ("Spurious message along relay.")
-
-decryptUntilClean :: ByteString -> [EncryptionState] -> [SHA1State] ->
-                     IO ([EncryptionState], [SHA1State], Maybe RelayCell)
-decryptUntilClean _    []                            [] =
-  return ([], [], Nothing)
-decryptUntilClean _    []                            _  =
-  fail "DecryptUntilClean with unevent arguments."
-decryptUntilClean _    _                             [] =
-  fail "DecryptUntilClean with unevent arguments. (2)"
-decryptUntilClean bstr (encstate:rstates) (h1:rhashes) =
-  do let (bstr', encstate') = decryptData encstate bstr
-     case runGetOrFail (parseRelayCell h1) bstr' of
-       Left _ ->
-         do (rstates', rhashes', res) <- decryptUntilClean bstr' rstates rhashes
-            return (encstate' : rstates', h1 : rhashes', res)
-       Right (_, _, (x, h1')) ->
-         return (encstate' : rstates, h1' : rhashes, Just x)
+ where
+  addDataBlock x block =
+    do mmv <- getDeleteFromMap (circDataBuffers circ) (relayStreamId x)
+       case mmv of
+         Nothing -> return ()
+         Just tv -> atomically $ do orig <- readTVar tv
+                                    writeTVar tv (orig `BS.append` block)
+  getDeleteFromMap mapMV key =
+    modifyMVar mapMV $ \ mvmap ->
+      return (Map.delete key mvmap, Map.lookup key mvmap)
+  answerResolve x result =
+    do mmv <- getDeleteFromMap (circResolveWaiters circ) (relayStreamId x)
+       case mmv of
+         Nothing -> return ()
+         Just mv -> putMVar mv result
+  --
+  continueExtend extdata =
+    do ok <- tryPutMVar (circExtendWaiter circ) (Right extdata)
+       unless ok $ destroyCircuit circ InternalError
+  --
+  destroyConnection x reason =
+   do mmv <- getDeleteFromMap (circConnectionWaiters circ) (relayStreamId x)
+      case mmv of
+        Nothing -> return ()
+        Just mv -> putMVar mv (Left reason)
+      _ <- getDeleteFromMap (circDataBuffers circ) (relayStreamId x)
+      return ()
+  --
+  finalizeConnect x =
+   do mmv <- getDeleteFromMap (circConnectionWaiters circ) (relayStreamId x)
+      case mmv of
+        Nothing -> return ()
+        Just mv ->
+          do res <- buildConnection circ (relayStreamId x)
+             putMVar mv (Right res)
+  --
+  decryptUntilClean :: ByteString -> [(EncryptionState, Context SHA1)] ->
+                       ([(EncryptionState, Context SHA1)], Maybe RelayCell)
+  decryptUntilClean _    []                    = ([], Nothing)
+  decryptUntilClean bstr ((encstate, h1):rest) =
+    let (bstr', encstate') = decryptData encstate bstr
+    in case runGetOrFail (parseRelayCell h1) (BSL.fromStrict bstr') of
+         Left _ ->
+           let (rest', res) = decryptUntilClean bstr' rest
+           in ((encstate', h1) : rest', res)
+         Right (_, _, (x, h1')) ->
+           (((encstate', h1') : rest), Just x)
 
 -- -----------------------------------------------------------------------------
 
-newtype EncryptionState = ES ByteString
+buildConnection :: TorEntrance -> Word16 -> IO TorConnection
+buildConnection circ strmId =
+  do readTV <- newTVarIO BS.empty
+     modifyMVar_ (circDataBuffers circ) $ \ dbmap ->
+       return (Map.insert strmId readTV dbmap)
+     return TorConnection{
+              torRead  = readBytes readTV
+            , torWrite = writeBytes circ strmId
+            , torClose = closeConnection circ strmId
+            }
 
-initEncryptionState :: AESKey128 -> EncryptionState
+readBytes :: TVar ByteString -> Int -> IO ByteString
+readBytes _      0   =
+  return BS.empty
+readBytes bstrTV amt =
+  do start <- atomically $ do buffer <- readTVar bstrTV
+                              when (BS.null buffer) retry
+                              let (res, rest) = BS.splitAt amt buffer
+                              writeTVar bstrTV rest
+                              return res
+     (start `BS.append`) <$> readBytes bstrTV (amt - BS.length start)
+
+writeBytes :: TorEntrance -> Word16 -> ByteString -> IO ()
+writeBytes circ strmId bstr
+  | BS.null bstr = return ()
+  | otherwise    =
+      do let (cur, rest) = BS.splitAt 503 bstr
+         writeCellOnCircuit circ (RelayData strmId cur)
+         writeBytes circ strmId rest
+
+closeConnection :: TorEntrance -> Word16 -> IO ()
+closeConnection c strmId = writeCellOnCircuit c (RelayEnd strmId ReasonDone)
+
+-- -----------------------------------------------------------------------------
+
+newtype EncryptionState = ES BSL.ByteString
+
+initEncryptionState :: AES128 -> EncryptionState
 initEncryptionState k = ES (xorStream k)
 
 encryptData :: EncryptionState -> ByteString -> (ByteString, EncryptionState)
 encryptData (ES state) bstr =
-  let (ebstr, state') = BS.splitAt (BS.length bstr) state
-  in (xorBS ebstr bstr, ES state')
+  let (ebstr, state') = BSL.splitAt (fromIntegral (BS.length bstr)) state
+  in (xorBS (BSL.toStrict ebstr) bstr, ES state')
 
 decryptData :: EncryptionState -> ByteString -> (ByteString, EncryptionState)
 decryptData = encryptData
 
-xorStream :: AESKey128 -> ByteString
-xorStream k = BS.fromChunks (go (0 :: Integer))
+xorStream :: AES128 -> BSL.ByteString
+xorStream k = BSL.fromChunks (go 0)
  where
-  go x =
-    case i2osp x 16 of
-      Left e     -> error ("Error building xorStream: " ++ show e)
-      Right bstr ->
-        let firstBit = encryptBlock k (BS.toStrict bstr)
-        in firstBit : go (x + 1)
+  go :: Integer -> [ByteString]
+  go x = ecbEncrypt k (i2ospOf_ 16 x) : go (plus1' x)
+  --
+  plus1' x = (x + 1) `mod` (2 ^ 128)
 
 xorBS :: ByteString -> ByteString -> ByteString
 xorBS a b = BS.pack (BS.zipWith xor a b)
 
 -- -----------------------------------------------------------------------------
 
-generateLocal' :: TorRNG -> (Integer, TorRNG)
-generateLocal' g =
-  case generateLocal oakley2 g of
-    Left err      -> error ("generateLocal': " ++ show err)
-    Right (x, g') -> (x, g')
+generateLocal' :: TorRNG -> (PrivateNumber, TorRNG)
+generateLocal' g = withDRG g (generatePrivate oakley2)
 
-completeTAPHandshake :: Integer -> ByteString ->
-                        (Bool, EncryptionState, SHA1State,
-                               EncryptionState, SHA1State)
-completeTAPHandshake x rbstr = (kh == kh', encsf, fhash, encsb, bhash)
+completeTAPHandshake :: PrivateNumber ->
+                        Either DestroyReason ByteString ->
+                        Either String ((EncryptionState, Context SHA1),
+                                       (EncryptionState, Context SHA1))
+completeTAPHandshake _ (Left drsn)   = Left (show drsn)
+completeTAPHandshake x (Right rbstr)
+  | kh == kh' = Right (f, b)
+  | otherwise = Left "Key agreement failure."
  where
   (gyBS, kh)   = BS.splitAt 128 rbstr
-  gy           = os2ip gyBS
-  k0           = computeSharedSecret oakley2 gy x
-  (kh', rest1) = BS.splitAt 20 (kdfTor k0)
+  gy           = PublicNumber (os2ip gyBS)
+  (kh', f, b)  = computeTAPValues x gy
+
+computeTAPValues :: PrivateNumber -> PublicNumber ->
+                    (ByteString, (EncryptionState, Context SHA1),
+                                 (EncryptionState, Context SHA1))
+computeTAPValues b ga = (kh, (encsf, fhash), (encsb, bhash))
+ where
+  SharedKey k0 = getShared oakley2 b ga
+  (kh, rest1)  = BS.splitAt 20 (kdfTor (i2ospOf_ 128 k0))
   (df,  rest2) = BS.splitAt 20  rest1
   (db,  rest3) = BS.splitAt 20  rest2
   (kf,  rest4) = BS.splitAt 16  rest3
   (kb,  _)     = BS.splitAt 16  rest4
-  Just keyf    = buildKey (BS.toStrict kf)
-  Just keyb    = buildKey (BS.toStrict kb)
+  keyf         = throwCryptoError (cipherInit kf)
+  keyb         = throwCryptoError (cipherInit kb)
   encsf        = initEncryptionState keyf
   encsb        = initEncryptionState keyb
-  fhash        = advanceSHA1State initialSHA1State df
-  bhash        = advanceSHA1State initialSHA1State db
+  fhash        = hashUpdate hashInit df
+  bhash        = hashUpdate hashInit db
 
 kdfTor :: ByteString -> ByteString
 kdfTor k0 = BS.concat (map kdfTorChunk [0..255])
   where kdfTorChunk x = sha1 (BS.snoc k0 x)
-
-

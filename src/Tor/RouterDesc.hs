@@ -1,14 +1,15 @@
 module Tor.RouterDesc(
          RouterDesc(..)
+       , blankRouterDesc
        , ExitRule(..)
        , AddrSpec(..)
        , PortSpec(..)
        )
  where
 
-import Codec.Crypto.RSA
-import Data.ByteString.Lazy(ByteString)
-import Data.Time
+import Crypto.PubKey.RSA
+import Data.ByteString(ByteString, empty)
+import Data.Hourglass
 import Data.Word
 
 data RouterDesc = RouterDesc {
@@ -21,7 +22,7 @@ data RouterDesc = RouterDesc {
      , routerBurstBandwidth          :: Int
      , routerObservedBandwidth       :: Int
      , routerPlatformName            :: String
-     , routerEntryPublished          :: UTCTime
+     , routerEntryPublished          :: DateTime
      , routerFingerprint             :: ByteString
      , routerHibernating             :: Bool
      , routerUptime                  :: Maybe Integer
@@ -33,8 +34,8 @@ data RouterDesc = RouterDesc {
      , routerSignature               :: ByteString
      , routerContact                 :: Maybe String
      , routerFamily                  :: [(Maybe ByteString, Maybe String)]
-     , routerReadHistory             :: Maybe (UTCTime, Int, [Int])
-     , routerWriteHistory            :: Maybe (UTCTime, Int, [Int])
+     , routerReadHistory             :: Maybe (DateTime, Int, [Int])
+     , routerWriteHistory            :: Maybe (DateTime, Int, [Int])
      , routerCachesExtraInfo         :: Bool
      , routerExtraInfoDigest         :: Maybe ByteString
      , routerHiddenServiceDir        :: Maybe Int
@@ -45,6 +46,42 @@ data RouterDesc = RouterDesc {
      , routerStatus                  :: [String]
      }
  deriving (Show)
+
+blankRouterDesc :: RouterDesc
+blankRouterDesc =
+  RouterDesc {
+    routerNickname                = ""
+  , routerIPv4Address             = "0.0.0.0"
+  , routerORPort                  = 0
+  , routerDirPort                 = Nothing
+  , routerParseLog                = []
+  , routerAvgBandwidth            = 0
+  , routerBurstBandwidth          = 0
+  , routerObservedBandwidth       = 0
+  , routerPlatformName            = "Haskell"
+  , routerEntryPublished          = timeFromElapsed (Elapsed (Seconds 0))
+  , routerFingerprint             = empty
+  , routerHibernating             = False
+  , routerUptime                  = Nothing
+  , routerOnionKey                = error "No public onion key"
+  , routerNTorOnionKey            = Nothing
+  , routerSigningKey              = error "No signing key"
+  , routerExitRules               = []
+  , routerIPv6Policy              = Left []
+  , routerSignature               = empty
+  , routerContact                 = Nothing
+  , routerFamily                  = []
+  , routerReadHistory             = Nothing
+  , routerWriteHistory            = Nothing
+  , routerCachesExtraInfo         = False
+  , routerExtraInfoDigest         = Nothing
+  , routerHiddenServiceDir        = Nothing
+  , routerLinkProtocolVersions    = []
+  , routerCircuitProtocolVersions = []
+  , routerAllowSingleHopExits     = False
+  , routerAlternateORAddresses    = []
+  , routerStatus                  = []
+  }
 
 data ExitRule = ExitRuleAccept AddrSpec PortSpec
               | ExitRuleReject AddrSpec PortSpec

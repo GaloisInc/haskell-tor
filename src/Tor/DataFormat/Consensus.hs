@@ -10,16 +10,15 @@ module Tor.DataFormat.Consensus(
  where
 
 import Control.Applicative
-import Data.Attoparsec.ByteString.Lazy
-import Data.ByteString.Lazy(ByteString)
+import Crypto.Hash.Easy
+import Data.Attoparsec.ByteString
+import Data.ByteString(ByteString)
 import Data.ByteString.Char8(unpack)
-import qualified Data.ByteString as BSS
-import qualified Data.ByteString.Lazy as BS
-import Data.Digest.Pure.SHA
+import qualified Data.ByteString as BS
+import Data.Hourglass
 import Data.Int
 import Data.Map(Map)
 import qualified Data.Map as Map
-import Data.Time
 import Data.Version
 import Data.Word
 import Tor.DataFormat.Helpers
@@ -27,9 +26,9 @@ import Tor.DataFormat.Helpers
 data Consensus = Consensus {
        conMethods             :: Maybe [Int]
      , conMethod              :: Int
-     , conValidAfter          :: UTCTime
-     , conFreshUntil          :: UTCTime
-     , conValidUntil          :: UTCTime
+     , conValidAfter          :: DateTime
+     , conFreshUntil          :: DateTime
+     , conValidUntil          :: DateTime
      , conVotingDelay         :: (Integer, Integer)
      , conSuggestedClientVers :: Maybe [Version]
      , conSuggestedServerVers :: Maybe [Version]
@@ -58,7 +57,7 @@ data Router = Router {
        rtrNickName       :: String
      , rtrIdentity       :: ByteString
      , rtrDigest         :: ByteString
-     , rtrPubTime        :: UTCTime
+     , rtrPubTime        :: DateTime
      , rtrIP             :: String
      , rtrOnionPort      :: Word16
      , rtrDirPort        :: Maybe Word16
@@ -74,10 +73,13 @@ parseConsensusDocument :: ByteString ->
                           Either String (Consensus, ByteString, ByteString)
 parseConsensusDocument bstr =
   case parse consensusDocument bstr of
-    Fail _ _ err -> Left err
-    Done _ res   -> Right (res, digest1, digest256)
+    Partial f -> processParse (f BS.empty)
+    x         -> processParse x
  where
   (digest1, digest256) = generateHashes bstr
+  processParse (Fail x _ err) = Left (err ++ " (around |" ++ show (BS.take 10 x) ++ "|)")
+  processParse (Partial _ )   = Left "Incomplete consensus document!"
+  processParse (Done _ res)   = Right (res, digest1, digest256)
 
 generateHashes :: ByteString -> (ByteString, ByteString)
 generateHashes infile = (sha1 message, sha256 message)
@@ -129,7 +131,7 @@ consensusDocument =
      return Consensus{..}
 
 consensusMethod :: Parser Int
-consensusMethod = decimalNum (\ x -> (x >= 1) && (x <= 18))
+consensusMethod = decimalNum (\ x -> (x >= 1) && (x <= 20))
 
 torVersion :: Parser Version
 torVersion =
@@ -139,7 +141,7 @@ torVersion =
                                      return (map toString tags)
      return Version{..}
 
-flag :: Parser BSS.ByteString
+flag :: Parser ByteString
 flag = string "Authority"
    <|> string "BadExit"
    <|> string "BadDirectory"

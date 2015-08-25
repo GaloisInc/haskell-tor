@@ -3,19 +3,20 @@ module Tor.RouterDesc.Render(
        )
  where
 
-import Codec.Crypto.RSA
 import Control.Monad
+import Crypto.Hash.Easy
+import Crypto.Number.Serialize
+import Crypto.PubKey.RSA
+import Crypto.PubKey.RSA.PKCS15
 import Data.Bits
-import Data.ByteString.Base64.Lazy
-import Data.ByteString.Lazy(ByteString)
-import qualified Data.ByteString.Lazy as BS
-import qualified Data.ByteString.Lazy.Char8 as BSC
+import Data.ByteString.Base64
+import Data.ByteString(ByteString)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC
 import Data.Char hiding (isHexDigit, isAlphaNum)
-import Data.Digest.Pure.SHA
-import Data.Time
+import Data.Hourglass
 import MonadLib
 import MonadLib.Monads
-import System.Locale
 import Tor.RouterDesc
 
 type Render = Writer String
@@ -38,7 +39,7 @@ putFourGroups xs =
 
 putPublicKey :: PublicKey -> Render ()
 putPublicKey (PublicKey _ n _) =
-  do let encoded = encode (i2osp n (1024 `div` 8))
+  do let encoded = encode (i2ospOf_ (1024 `div` 8) n)
      put "-----BEGIN RSA PUBLIC KEY-----\n"
      putLines (BSC.unpack encoded)
      put "-----END RSA PUBLIC KEY-----\n"
@@ -91,13 +92,15 @@ renderRouterDesc' r k =
                                     putWord "router-signature"
                                     endLine
      let descbstr = BSC.pack desc
-         hashSHA1' = HashInfo BS.empty sha1
-         signature = rsassa_pkcs1_v1_5_sign hashSHA1' k descbstr
-         encodedsig = encode signature
-     put desc
-     put "-----BEGIN SIGNATURE-----\n"
-     putLines (BSC.unpack encodedsig)
-     put "-----END SIGNATURE-----\n"
+         msignature = sign Nothing noHash k (sha1 descbstr)
+     case msignature of
+       Left _          -> return () -- error?
+       Right signature ->
+         do let encodedsig = encode signature
+            put desc
+            put "-----BEGIN SIGNATURE-----\n"
+            putLines (BSC.unpack encodedsig)
+            put "-----END SIGNATURE-----\n"
 
 renderRouterLine :: RouterDesc -> Render ()
 renderRouterLine r =
@@ -129,7 +132,10 @@ renderPlatform r =
 renderPublished :: RouterDesc -> Render ()
 renderPublished r =
   do putWord "published"
-     put (formatTime defaultTimeLocale "%F %X" (routerEntryPublished r))
+     let fmt = [Format_Year4, Format_Text '-', Format_Month2, Format_Text '-',
+                Format_Day2, Format_Text ' ', Format_Hour, Format_Text ':',
+                Format_Minute, Format_Text ':', Format_Second]
+     put (timePrint fmt (routerEntryPublished r))
      endLine
 
 renderFingerprint :: RouterDesc -> Render ()
@@ -232,6 +238,7 @@ renderFamily r =
     do putWord "family"
        putSeperated " " renderRouterFamily (routerFamily r)
  where
+  renderRouterFamily :: (Maybe ByteString, Maybe [Char]) -> Render ()
   renderRouterFamily (Nothing, Nothing) = return () -- fail?
   renderRouterFamily (Just x,  Nothing) =
     do put "$"
@@ -250,13 +257,16 @@ renderReadHistory r = renderHistory "read" (routerReadHistory r)
 renderWriteHistory :: RouterDesc -> Render ()
 renderWriteHistory r = renderHistory "write" (routerWriteHistory r)
 
-renderHistory :: String -> Maybe (UTCTime, Int, [Int]) -> Render ()
+renderHistory :: String -> Maybe (DateTime, Int, [Int]) -> Render ()
 renderHistory _         Nothing                          =
   return ()
 renderHistory histtype (Just (tstamp, interval, counts)) =
   do put histtype
      putWord "-history"
-     putWord (formatTime defaultTimeLocale "%F %X" tstamp)
+     let fmt = [Format_Year4, Format_Text '-', Format_Month2, Format_Text '-',
+                Format_Day2, Format_Text ' ', Format_Hour, Format_Text ':',
+                Format_Minute, Format_Text ':', Format_Second]
+     put (timePrint fmt tstamp)
      putWord' interval
      putSeperated "," (put . show) counts
      endLine

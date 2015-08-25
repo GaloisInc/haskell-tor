@@ -1,3 +1,4 @@
+{-# LANGUAGE DeriveDataTypeable #-}
 module Tor.DataFormat.TorCell(
          TorCell(..),       putTorCell,       getTorCell
        , DestroyReason(..), putDestroyReason, getDestroyReason
@@ -7,11 +8,14 @@ module Tor.DataFormat.TorCell(
  where
 
 import Control.Applicative
+import Control.Exception
 import Control.Monad
 import Data.Binary.Get
 import Data.Binary.Put
-import Data.ByteString.Lazy(ByteString)
-import qualified Data.ByteString.Lazy as BS
+import Data.ByteString(ByteString)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as BSL
+import Data.Typeable
 import Data.X509
 import Data.Word
 import Tor.DataFormat.TorAddress
@@ -42,63 +46,62 @@ getTorCell =
      case command of
        0   -> getStandardCell $ return Padding
        1   -> getStandardCell $
-                Create circuit <$> getLazyByteString (128 + 16 + 42)
+                Create circuit <$> getByteString (128 + 16 + 42)
        2   -> getStandardCell $
-                Created circuit <$> getLazyByteString (128 + 20)
-       3   -> getStandardCell $ Relay circuit <$> getRemainingLazyByteString
+                Created circuit <$> getByteString (128 + 20)
+       3   -> getStandardCell $ Relay circuit <$> getByteString 509
        4   -> getStandardCell $ Destroy circuit <$> getDestroyReason
-       5   -> getStandardCell $ CreateFast circuit <$> getLazyByteString 20
-       6   -> getStandardCell $ CreatedFast circuit <$> getLazyByteString 20
-                                                    <*> getLazyByteString 20
+       5   -> getStandardCell $ CreateFast circuit <$> getByteString 20
+       6   -> getStandardCell $ CreatedFast circuit <$> getByteString 20
+                                                    <*> getByteString 20
        8   -> getStandardCell $
                 do tstamp   <- getWord32be
                    otherOR  <- getTorAddress
                    numAddrs <- getWord8
                    thisOR   <- replicateM (fromIntegral numAddrs) getTorAddress
                    return (NetInfo tstamp otherOR thisOR)
-       9   -> getStandardCell $
-                RelayEarly circuit <$> getRemainingLazyByteString
+       9   -> getStandardCell $ RelayEarly circuit <$> getByteString 509
        10  -> getStandardCell $
                 do htype <- getHandshakeType
                    hlen  <- getWord16be
-                   hdata <- getLazyByteString (fromIntegral hlen)
+                   hdata <- getByteString (fromIntegral hlen)
                    return (Create2 circuit htype hdata)
        11  -> getStandardCell $
                 do hlen  <- getWord16be
-                   hdata <- getLazyByteString (fromIntegral hlen)
+                   hdata <- getByteString (fromIntegral hlen)
                    return (Created2 circuit hdata)
        7   -> fail "Should not be getting versions through this interface."
        128 -> getVariableLength "VPadding"      getVPadding
        129 -> getVariableLength "Certs"         getCerts
        130 -> getVariableLength "AuthChallenge" getAuthChallenge
        131 -> getVariableLength "Authenticate"  getAuthenticate
-       132 -> getVariableLength "Authorize"     (return Authorize)
+       132 -> getVariableLength "Authorize"     (\ _ -> return Authorize)
        _   -> fail "Improper Tor cell command."
  where
   getStandardCell getter =
-    do bstr <- getLazyByteString 509 -- PAYLOAD_LEN
-       case runGetOrFail getter bstr of
+    do bstr <- getByteString 509 -- PAYLOAD_LEN
+       case runGetOrFail getter (BSL.fromStrict bstr) of
          Left (_, _, err) -> fail err
          Right (_, _, x)  -> return x
   getVariableLength name getter =
     do len   <- getWord16be
-       body  <- getLazyByteString (fromIntegral len)
-       case runGetOrFail getter body of
+       body  <- getByteString (fromIntegral len)
+       case runGetOrFail (getter len) (BSL.fromStrict body) of
          Left  (_, _, s) -> fail ("Couldn't read " ++ name ++ " body: " ++ s)
          Right (_, _, x) -> return x
- --
-  getVPadding = VPadding <$> getRemainingLazyByteString
   --
-  getAuthChallenge =
-    do challenge <- getLazyByteString 32
+  getVPadding len = VPadding <$> getByteString (fromIntegral len)
+  --
+  getAuthChallenge _ =
+    do challenge <- getByteString 32
        n_methods <- getWord16be
        methods   <- replicateM (fromIntegral n_methods) getWord16be
        return (AuthChallenge challenge methods)
   --
-  getAuthenticate =
+  getAuthenticate _ =
     do _ <- getWord16be -- AuthType
        l <- getWord16be
-       s <- getLazyByteString (fromIntegral l)
+       s <- getByteString (fromIntegral l)
        return (Authenticate s)
 
 putTorCell :: TorCell -> Put
@@ -109,17 +112,17 @@ putTorCell (Create circ bstr) =
   putStandardCell $
     do putWord32be       circ
        putWord8          1
-       putLazyByteString bstr
+       putByteString bstr
 putTorCell (Created circ bstr) =
   putStandardCell $
     do putWord32be       circ
        putWord8          2
-       putLazyByteString bstr
+       putByteString bstr
 putTorCell (Relay circ bstr) =
   putStandardCell $
     do putWord32be       circ
        putWord8          3
-       putLazyByteString bstr
+       putByteString bstr
 putTorCell (Destroy circ dreason) =
   putStandardCell $
     do putWord32be       circ
@@ -129,13 +132,13 @@ putTorCell (CreateFast circ keymat) =
   putStandardCell $
     do putWord32be       circ
        putWord8          5
-       putLazyByteString keymat
+       putByteString keymat
 putTorCell (CreatedFast circ keymat deriv) =
   putStandardCell $
     do putWord32be       circ
        putWord8          6
-       putLazyByteString keymat
-       putLazyByteString deriv
+       putByteString keymat
+       putByteString deriv
 putTorCell (NetInfo ttl oneside others) =
   putStandardCell $
     do putWord32be       0
@@ -148,25 +151,25 @@ putTorCell (RelayEarly circ bstr) =
   putStandardCell $
     do putWord32be       circ
        putWord8          9
-       putLazyByteString bstr
+       putByteString bstr
 putTorCell (Create2 circ htype cdata) =
   putStandardCell $
     do putWord32be       circ
        putWord8          10
        putHandshakeType  htype
        putWord16be       (fromIntegral (BS.length cdata))
-       putLazyByteString cdata
+       putByteString cdata
 putTorCell (Created2 circ cdata) =
   putStandardCell $
     do putWord32be       circ
        putWord8          11
        putWord16be       (fromIntegral (BS.length cdata))
-       putLazyByteString cdata
+       putByteString cdata
 putTorCell (VPadding bstr) =
   do putWord32be       0
      putWord8          128
      putWord16be       (fromIntegral (BS.length bstr))
-     putLazyByteString bstr
+     putByteString bstr
 putTorCell (Certs cs) =
   do putWord32be       0
      putWord8          129
@@ -177,7 +180,7 @@ putTorCell (AuthChallenge challenge methods) =
   do putWord32be       0
      putWord8          130
      putLenByteString $
-       do putLazyByteString challenge
+       do putByteString challenge
           putWord16be       (fromIntegral (length methods))
           forM_ methods putWord16be
 putTorCell (Authenticate authent) =
@@ -186,7 +189,7 @@ putTorCell (Authenticate authent) =
      putLenByteString $
        do putWord16be       1
           putWord16be       (fromIntegral (BS.length authent))
-          putLazyByteString authent
+          putByteString authent
 putTorCell (Authorize) =
   do putWord32be       0
      putWord8          132
@@ -200,14 +203,14 @@ putTorCell (Versions) =
 putLenByteString :: Put -> Put
 putLenByteString m =
   do let bstr = runPut m
-     putWord16be (fromIntegral (BS.length bstr))
+     putWord16be (fromIntegral (BSL.length bstr))
      putLazyByteString bstr
 
 putStandardCell :: Put -> Put
 putStandardCell m =
   do let bstr = runPut m
-         infstr = bstr `BS.append` BS.repeat 0
-     putLazyByteString (BS.take 514 infstr)
+         infstr = bstr `BSL.append` BSL.repeat 0
+     putLazyByteString (BSL.take 514 infstr)
 
 -- -----------------------------------------------------------------------------
 
@@ -225,7 +228,9 @@ data DestroyReason = NoReason
                    | CircuitDestroyed
                    | NoSuchService
                    | UnknownDestroyReason Word8
- deriving (Eq, Show)
+ deriving (Eq, Show, Typeable)
+
+instance Exception DestroyReason
 
 getDestroyReason :: Get DestroyReason
 getDestroyReason =
@@ -286,7 +291,7 @@ putHandshakeType (Unknown x) = putWord16be x
 
 data TorCert = LinkKeyCert SignedCertificate
              | RSA1024Identity SignedCertificate
-             | RSA1024Authenticate SignedCertificate
+             | RSA1024Auth SignedCertificate
              | UnknownCertType Word8 ByteString
  deriving (Eq, Show)
 
@@ -294,34 +299,33 @@ getTorCert :: Get TorCert
 getTorCert =
   do t <- getWord8
      l <- getWord16be
-     c <- getLazyByteString (fromIntegral l)
+     c <- getByteString (fromIntegral l)
      case t of
        1 -> return (maybeBuild LinkKeyCert         t c)
        2 -> return (maybeBuild RSA1024Identity     t c)
-       3 -> return (maybeBuild RSA1024Authenticate t c)
+       3 -> return (maybeBuild RSA1024Auth t c)
        _ -> return (UnknownCertType t c)
  where
   maybeBuild builder t bstr =
-    case decodeSignedObject (BS.toStrict bstr) of
+    case decodeSignedObject bstr of
       Left  _   -> UnknownCertType t bstr
       Right res -> builder res
 
 putTorCert :: TorCert -> Put
 putTorCert tc =
   do let (t, bstr) = case tc of
-                       LinkKeyCert sc         -> (1, encodeSignedObject' sc)
-                       RSA1024Identity sc     -> (2, encodeSignedObject' sc)
-                       RSA1024Authenticate sc -> (3, encodeSignedObject' sc)
-                       UnknownCertType ct bs  -> (ct, bs)
+                       LinkKeyCert sc        -> (1, encodeSignedObject sc)
+                       RSA1024Identity sc    -> (2, encodeSignedObject sc)
+                       RSA1024Auth sc        -> (3, encodeSignedObject sc)
+                       UnknownCertType ct bs -> (ct, bs)
      putWord8          t
      putWord16be       (fromIntegral (BS.length bstr))
-     putLazyByteString bstr
- where encodeSignedObject' = BS.fromStrict . encodeSignedObject
+     putByteString bstr
 
 -- -----------------------------------------------------------------------------
 
-getCerts :: Get TorCell
-getCerts =
+getCerts :: Word16 -> Get TorCell
+getCerts _ =
   do num   <- getWord8
      certs <- replicateM (fromIntegral num) getTorCert
      return (Certs certs)

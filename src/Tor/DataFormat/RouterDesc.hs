@@ -5,44 +5,40 @@ module Tor.DataFormat.RouterDesc(
        )
  where
 
-import Codec.Crypto.RSA.Pure
 import Control.Applicative
-import Data.Attoparsec.ByteString.Lazy
-import Data.ByteString.Lazy(ByteString)
-import qualified Data.ByteString.Lazy as BS
-import qualified Data.ByteString.Lazy.Char8 as BSC
-import Data.Digest.Pure.SHA
-import Data.Int
+import Crypto.Hash.Easy
+import Crypto.PubKey.RSA.PKCS15
+import Data.Attoparsec.ByteString
+import Data.ByteString(ByteString)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC
+import Data.Hourglass
 import Data.Map(Map)
 import qualified Data.Map.Strict as Map
 import Data.String
-import Data.Time
 import Tor.DataFormat.Helpers
 import Tor.RouterDesc
 
+-- FIXME: Accept partial input.
 parseDirectory :: ByteString -> [Either String RouterDesc]
 parseDirectory bstr = map parseChunk (chunkRouters bstr)
  where
   parseChunk (chunk, signedPortion) =
     case parse parseRouterDesc chunk of
-      Fail _ _ _ ->
-        Left "Router description failed to parse."
-      Done leftover res
-        | BS.null leftover ->
-           let key = routerSigningKey res
-               sig = routerSignature res
-               -- Tor uses a weird variation on PKCS signing in which they don't
-               -- transmit the hash type
-               hashSHA1' = HashInfo BS.empty sha1
-           in case rsassa_pkcs1_v1_5_verify hashSHA1' key signedPortion sig of
-                Left err ->
-                  Left ("RSA verification failed: " ++ show err ++ "  " ++ show (BS.length sig))
-                Right True ->
-                  Right res
-                Right False ->
-                  Left ("Invalid signature.\nsignedPortion = " ++ show signedPortion)
-        | otherwise ->
-           Left "Unconsumed input in router description."
+      Partial f -> processParse signedPortion (f BS.empty)
+      x         -> processParse signedPortion x
+  processParse _ (Fail _ _ _) = Left "Router description failed to parse."
+  processParse _ (Partial _)  = Left "Partial data for router description."
+  processParse signedPortion (Done leftover res) | BS.null leftover =
+    let key  = routerSigningKey res
+        sig  = routerSignature res
+        body = sha1 signedPortion
+        -- Tor uses a weird variation on PKCS signing in which they don't
+        -- transmit the hash type
+    in if verify noHash key body sig
+          then Right res
+          else Left "RSA verification failed."
+  processParse _ _ =   Left "Unconsumed input in router description."
 
 chunkRouters :: ByteString -> [(ByteString, ByteString)]
 chunkRouters bstr =
@@ -67,7 +63,7 @@ nextRouter orig = goState1 orig 0
      Just (_, rest) ->
        goState1 rest (off + 1)
   --
-  goState2 :: ByteString -> Int64 -> ByteString -> Int64 ->
+  goState2 :: ByteString -> Int -> ByteString -> Int ->
               Maybe (ByteString, ByteString, ByteString)
   goState2 mainDesc mainoff bstr off =
     case BSC.uncons bstr of
@@ -210,7 +206,7 @@ routerStart =
          , routerBurstBandwidth          = 0
          , routerObservedBandwidth       = 0
          , routerPlatformName            = ""
-         , routerEntryPublished          = UTCTime (fromGregorian 1970 1 1) 0
+         , routerEntryPublished          = timeFromElapsed (Elapsed 0)
          , routerFingerprint             = BS.empty
          , routerHibernating             = False
          , routerUptime                  = Nothing
@@ -390,7 +386,7 @@ writeHistory r =
   do whist <- history "write-history"
      return r{ routerWriteHistory = Just whist }
 
-history :: String -> Parser (UTCTime, Int, [Int])
+history :: String -> Parser (DateTime, Int, [Int])
 history kind =
   do _ <- option "" (string "opt")
      _ <- whitespace

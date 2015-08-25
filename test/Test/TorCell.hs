@@ -1,17 +1,24 @@
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE RecordWildCards   #-}
 module Test.TorCell(torCellTests) where
 
-import Control.Applicative
 import Control.Monad
+import Crypto.Hash
+import Data.ASN1.OID
 import Data.Binary.Get
 import Data.Binary.Put
-import Data.ByteString.Lazy(ByteString)
-import qualified Data.ByteString.Lazy as BS
-import qualified Data.ByteString.Lazy.Char8 as BSC
-import Data.Digest.Pure.SHA1
+import Data.ByteArray(convert)
+import Data.ByteString(ByteString)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC
+import qualified Data.ByteString.Lazy  as BSL
+import Data.ByteString.Lazy(toStrict,fromStrict)
+import Data.Hourglass
 import Data.List
+import Data.String
 import Data.Word
+import Data.X509
 import Numeric
-import Test.Certificate()
 import Test.QuickCheck
 import Test.Framework
 import Test.Framework.Providers.QuickCheck2
@@ -19,8 +26,7 @@ import Test.Standard
 import Tor.DataFormat.RelayCell
 import Tor.DataFormat.TorAddress
 import Tor.DataFormat.TorCell
-
-import Debug.Trace
+import Tor.State.Credentials
 
 instance Arbitrary TorAddress where
   arbitrary = oneof [ Hostname <$> genHostname
@@ -58,10 +64,10 @@ instance Arbitrary TorAddressBS where
                              bstr = BS.pack x
                          return (TABS bstr (IP4 str))
                     , do x <- replicateM 16 arbitrary
-                         let bstr = BS.pack x
+                         let bstr = BSL.pack x
                              xs   = runGet (replicateM 8 getWord16be) bstr
                              str  = "[" ++ intercalate ":" (map showHex' xs) ++ "]"
-                         return (TABS bstr (IP6 str))
+                         return (TABS (toStrict bstr) (IP6 str))
                     ]
 
 prop_TorAddrBSSerial :: TorAddressBS -> Bool
@@ -95,14 +101,12 @@ prop_DestroyReasonSerial1 = serialProp getDestroyReason putDestroyReason
 
 prop_DestroyReasonSerial2 :: Word8 -> Bool
 prop_DestroyReasonSerial2 x =
-  [x] == BS.unpack (runPut (putDestroyReason
-                      (runGet getDestroyReason (BS.pack [x]))))
+  [x] == BSL.unpack (runPut (putDestroyReason
+                       (runGet getDestroyReason (BSL.pack [x]))))
 
 instance Arbitrary RelayEndReason where
-  arbitrary = oneof [ ReasonExitPolicy <$> (BS.pack <$> replicateM 4 arbitrary)
-                                       <*> arbitrary
-                    , ReasonExitPolicy <$> (BS.pack <$> replicateM 16 arbitrary)
-                                       <*> arbitrary
+  arbitrary = oneof [ ReasonExitPolicy <$> (IP4 <$> genIP4) <*> arbitrary
+                    , ReasonExitPolicy <$> (IP6 <$> genIP6) <*> arbitrary
                     , elements [ReasonMisc, ReasonResolveFailed,
                         ReasonConnectionRefused, ReasonDestroyed, ReasonDone,
                         ReasonTimeout, ReasonNoRoute, ReasonHibernating,
@@ -115,8 +119,9 @@ prop_RelayEndRsnSerial :: RelayEndReason -> Bool
 prop_RelayEndRsnSerial rsn =
   let bstr = runPut (putRelayEndReason rsn)
       len  = case rsn of
-               ReasonExitPolicy x _ -> fromIntegral (BS.length x + 4 + 1)
-               _                    -> 1
+               ReasonExitPolicy (IP4 _) _ -> 9
+               ReasonExitPolicy (IP6 _) _ -> 21
+               _                          -> 1
       rsn' = runGet (getRelayEndReason len) bstr
   in rsn == rsn'
 
@@ -180,34 +185,28 @@ prop_RelayCellSerial x =
   let (_, gutsBS) = runPutM (putRelayCellGuts x)
       bstr        = runPut (putRelayCell (BS.replicate 4 0) x)
       (_, y)      = runGet getRelayCell bstr
-  in (BS.length gutsBS <= (509 - 11)) ==> (x == y)
+  in (BSL.length gutsBS <= (509 - 11)) ==> (x == y)
 
-instance Arbitrary SHA1State where
-  arbitrary = (customSHA1State . BS.pack) `fmap` (vectorOf 20 arbitrary)
-
-instance Show SHA1State where
-  show _ = "<SHA1State>"
-
-prop_RelayCellDigestWorks1 :: SHA1State -> RelayCell -> Property
-prop_RelayCellDigestWorks1 state x =
+prop_RelayCellDigestWorks1 :: RelayCell -> Property
+prop_RelayCellDigestWorks1 x =
   let (_, gutsBS) = runPutM (putRelayCellGuts x)
-      (bstr, _)   = renderRelayCell state x
-      (x',   _)   = runGet (parseRelayCell state) bstr
-  in (BS.length gutsBS <= (509 - 11)) ==> (x == x')
+      (bstr, _)   = renderRelayCell hashInit x
+      (x',   _)   = runGet (parseRelayCell hashInit) (fromStrict bstr)
+  in (BSL.length gutsBS <= (509 - 11)) ==> (x == x')
 
-prop_RelayCellDigestWorks2 :: SHA1State -> NonEmptyList RelayCell -> Property
-prop_RelayCellDigestWorks2 state xs =
+prop_RelayCellDigestWorks2 :: NonEmptyList RelayCell -> Property
+prop_RelayCellDigestWorks2 xs =
   let mxSize = maximum (map putGuts (getNonEmpty xs))
-      xs'    = runCheck state state (getNonEmpty xs)
+      xs'    = runCheck hashInit hashInit (getNonEmpty xs)
   in (mxSize <= (509 - 11)) ==> (getNonEmpty xs == xs')
  where
   putGuts x =
     let (_, gutsBS) = runPutM (putRelayCellGuts x)
-    in BS.length gutsBS
+    in BSL.length gutsBS
   runCheck _ _ [] = []
   runCheck rstate pstate (f:rest) =
     let (bstr, rstate') = renderRelayCell rstate f
-        (f',   pstate') = runGet (parseRelayCell pstate) bstr
+        (f',   pstate') = runGet (parseRelayCell pstate) (fromStrict bstr)
     in f' : runCheck rstate' pstate' rest
 
 instance Arbitrary HandshakeType where
@@ -221,10 +220,88 @@ prop_HandTypeSerial2 x =
   let ht = runGet getHandshakeType (runPut (putWord16be x))
   in runPut (putWord16be x) == runPut (putHandshakeType ht)
 
+instance Arbitrary (SignedExact Certificate) where
+  arbitrary =
+    do certVersion      <- arbitrary
+       certSerial       <- arbitrary
+       certIssuerDN     <- arbitrary
+       certSubjectDN    <- arbitrary
+       hashAlg          <- elements [HashSHA1, HashSHA256, HashSHA384]
+
+       g  <- arbitraryRNG
+       let (pub, _, _) = generateKeyPair g 1024
+
+       let keyAlg           = PubKeyALG_RSA -- FIXME?
+           certSignatureAlg = SignatureALG hashAlg keyAlg
+           certValidity     = (timeFromElapsed (Elapsed (Seconds 257896558)),
+                               timeFromElapsed (Elapsed (Seconds 2466971758)))
+           certPubKey       = PubKeyRSA pub
+           certExtensions   = Extensions Nothing
+
+       let baseCert = Certificate{ .. }
+           sigfun   = case hashAlg of
+                        HashSHA1   -> wrapSignatureAlg certSignatureAlg sha1
+                        HashSHA224 -> wrapSignatureAlg certSignatureAlg sha224
+                        HashSHA256 -> wrapSignatureAlg certSignatureAlg sha256
+                        HashSHA384 -> wrapSignatureAlg certSignatureAlg sha384
+                        HashSHA512 -> wrapSignatureAlg certSignatureAlg sha512
+                        _          -> error "INTERNAL WEIRDNESS"
+       let (signedCert, _) = objectToSignedExact sigfun baseCert
+       return signedCert
+
+newtype ReadableStr = ReadableStr { unReadableStr :: String }
+
+instance Show ReadableStr where
+  show = show . unReadableStr
+
+instance Arbitrary ReadableStr where
+  arbitrary =
+    do len <- choose (1, 256)
+       str <- replicateM len (elements printableChars)
+       return (ReadableStr str)
+   where printableChars = ['a'..'z'] ++ ['A'..'Z'] ++ ['_','.',' ']
+
+instance Arbitrary DistinguishedName where
+  arbitrary =
+    do cn <- unReadableStr <$> arbitrary
+       co <- unReadableStr <$> arbitrary
+       og <- unReadableStr <$> arbitrary
+       ou <- unReadableStr <$> arbitrary
+       return (DistinguishedName [
+                 (getObjectID DnCommonName,       fromString cn)
+               , (getObjectID DnCountry,          fromString co)
+               , (getObjectID DnOrganization,     fromString og)
+               , (getObjectID DnOrganizationUnit, fromString ou)
+               ])
+
+wrapSignatureAlg :: SignatureALG ->
+                    (ByteString -> ByteString) ->
+                    ByteString ->
+                    (ByteString, SignatureALG, ())
+wrapSignatureAlg name sha bstr =
+  let hashed   = convert (sha bstr)
+  in (hashed, name, ())
+
+sha1 :: ByteString -> ByteString
+sha1 = convert . hashWith SHA1
+
+sha224 :: ByteString -> ByteString
+sha224 = convert . hashWith SHA224
+
+sha256 :: ByteString -> ByteString
+sha256 = convert . hashWith SHA256
+
+sha384 :: ByteString -> ByteString
+sha384 = convert . hashWith SHA384
+
+sha512 :: ByteString -> ByteString
+sha512 = convert . hashWith SHA512
+
+
 instance Arbitrary TorCert where
-  arbitrary = oneof [ LinkKeyCert         <$> arbitrary
-                    , RSA1024Identity     <$> arbitrary
-                    , RSA1024Authenticate <$> arbitrary
+  arbitrary = oneof [ LinkKeyCert     <$> arbitrary
+                    , RSA1024Identity <$> arbitrary
+                    , RSA1024Auth     <$> arbitrary
                     ]
 
 prop_torCertSerial :: TorCert -> Bool

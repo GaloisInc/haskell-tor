@@ -1,26 +1,19 @@
 module Test.Standard where
 
-import Control.Applicative
 import Control.Monad
-import Crypto.Random.DRBG
+import Crypto.Random
 import Data.Binary.Get
 import Data.Binary.Put
-import Data.ByteString(pack)
+import Data.ByteArray(pack)
+import Data.ByteString(ByteString)
 import qualified Data.ByteString.Lazy as BS
-import Data.Tagged
 import Test.QuickCheck
 
-arbitraryRNG :: Gen HashDRBG
-arbitraryRNG =
-  do let tagSeedLen = genSeedLength :: Tagged HashDRBG ByteLength
-         tagSeedAmt = unTagged tagSeedLen
-     bstr <- pack <$> replicateM tagSeedAmt arbitrary
-     case newGen bstr of
-       Left e  -> fail ("Couldn't generate arbitrary HashDRBG: " ++ show e)
-       Right g -> return g
+arbitraryRNG :: Gen ChaChaDRG
+arbitraryRNG = drgNew
 
-arbitraryBS :: Int -> Gen BS.ByteString
-arbitraryBS x = BS.pack <$> replicateM x arbitrary
+arbitraryBS :: Int -> Gen ByteString
+arbitraryBS x = pack <$> replicateM x arbitrary
 
 serialProp :: Eq a => Get a -> (a -> Put) -> a -> Bool
 serialProp getter putter x =
@@ -28,4 +21,5 @@ serialProp getter putter x =
       y    = runGet getter bstr
   in x == y
 
- 
+instance MonadRandom Gen where
+  getRandomBytes x = pack <$> replicateM x arbitrary

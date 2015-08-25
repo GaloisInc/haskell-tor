@@ -1,5 +1,6 @@
 {-# LANGUAGE MultiWayIf        #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards   #-}
 module Tor.DataFormat.Helpers(
          PortSpec(..)
        , AddrSpec(..)
@@ -31,21 +32,20 @@ module Tor.DataFormat.Helpers(
        )
  where
 
-import Codec.Crypto.RSA.Pure
 import Control.Applicative
+import Crypto.PubKey.RSA
 import Data.ASN1.BinaryEncoding
 import Data.ASN1.Encoding
 import Data.ASN1.Types
-import Data.Attoparsec.ByteString.Lazy
+import Data.Attoparsec.ByteString
 import Data.ByteString.Char8(pack)
-import Data.ByteString.Base64.Lazy
-import Data.ByteString.Lazy(ByteString)
-import qualified Data.ByteString.Lazy as BS
-import qualified Data.ByteString.Lazy.Char8 as BSC
+import Data.ByteString.Base64
+import Data.ByteString(ByteString)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC
 import Data.Char hiding (isHexDigit, isAlphaNum)
-import Data.Time
+import Data.Hourglass
 import Data.Word
-import System.Locale
 import Tor.RouterDesc
 
 standardLine :: String -> Parser a -> Parser a
@@ -149,35 +149,46 @@ publicKey' =
   do _ <- string "-----BEGIN RSA PUBLIC KEY-----\n"
      let end = string "-----END RSA PUBLIC KEY-----\n"
      bstr <- decodeBase64 =<< manyTill base64Char end
-     case decodeASN1 DER bstr of
-       Left _ ->
-         empty
+     case decodeASN1' DER bstr of
+       Left  _    -> empty
        Right asn1 ->
-         case fromASN1 asn1 of
-           Left _ -> empty
-           Right (x, _) ->
-             return (x, bstr)
+         case fromASN1' asn1 of
+           Left  _ -> empty
+           Right x -> return (x, bstr)
+ where
+  fromASN1' (Start Sequence : IntVal n : IntVal e : End Sequence : _) =
+    Right (PublicKey { public_size = calculate_modulus n 1
+                     , public_n    = n
+                     , public_e    = e
+                     })
+  fromASN1' _ = Left ("fromASN1: RSA PublicKey: unexpected format" :: String)
+  --
+  calculate_modulus n i =
+    if (2 ^ (i * 8)) > n then i else calculate_modulus n (i + 1)
 
 publicKey :: Parser PublicKey
 publicKey = fst <$> publicKey'
 
-utcTime :: Parser UTCTime
+utcTime :: Parser DateTime
 utcTime =
-  do year <- BS.pack `fmap` count 4 decDigit
-     _    <- char8 '-'
-     mon  <- BS.pack `fmap` count 2 decDigit
-     _    <- char8 '-'
-     day  <- BS.pack `fmap` count 2 decDigit
-     _    <- char8 ' '
-     hour <- BS.pack `fmap` count 2 decDigit
-     _    <- char8 ':'
-     minu <- BS.pack `fmap` count 2 decDigit
-     _    <- char8 ':'
-     sec  <- BS.pack `fmap` count 2 decDigit
-     let timestr = BS.concat [year,"-",mon,"-",day," ",hour,":",minu,":",sec]
-     case readsTime defaultTimeLocale "%F %X" (BSC.unpack timestr) of
-       [(x, "")] -> return x
-       _         -> empty
+  do dateYear  <- toEnum' `fmap` count 4 decDigit
+     _         <- char8 '-'
+     dateMonth <- toEnum' `fmap` count 2 decDigit
+     _         <- char8 '-'
+     dateDay   <- toEnum' `fmap` count 2 decDigit
+     _         <- char8 ' '
+     todHour   <- toEnum' `fmap` count 2 decDigit
+     _         <- char8 ':'
+     todMin    <- toEnum' `fmap` count 2 decDigit
+     _         <- char8 ':'
+     todSec    <- toEnum' `fmap` count 2 decDigit
+     let todNSec = 0
+         dtDate = Date { .. }
+         dtTime = TimeOfDay { .. }
+     return DateTime{..}
+ where
+  toEnum' :: Enum a => [Word8] -> a
+  toEnum' = toEnum . read . BSC.unpack . BS.pack
 
 -- ----------------------------------------------------------------------------
 

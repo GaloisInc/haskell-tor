@@ -8,24 +8,23 @@ module Tor.State.Directories(
        )
  where
 
-import Codec.Crypto.RSA
+import Crypto.PubKey.RSA
 import Crypto.Random
 import Control.Concurrent.STM
 import Control.Monad
 import Data.ByteString(uncons)
-import Data.ByteString.Lazy(ByteString)
-import Data.ByteString.Lazy.Char8(pack)
+import Data.ByteString(ByteString)
+import Data.ByteString.Char8(pack)
 import Data.Either
-import Data.List
+import Data.Hourglass
+import Data.List hiding (uncons)
 import Data.Maybe
-import Data.Time
 import Data.Word
 import Tor.DataFormat.Consensus
 import Tor.DataFormat.DefaultDirectory
 import Tor.DataFormat.DirCertInfo
 import Tor.NetworkStack
 import Tor.NetworkStack.Fetch
-import Tor.State.RNG
 
 data Directory = Directory {
        dirNickname    :: String
@@ -35,8 +34,8 @@ data Directory = Directory {
      , dirDirPort     :: Word16
      , dirV3Ident     :: Maybe ByteString
      , dirFingerprint :: ByteString
-     , dirPublished   :: UTCTime
-     , dirExpires     :: UTCTime
+     , dirPublished   :: DateTime
+     , dirExpires     :: DateTime
      , dirIdentityKey :: PublicKey
      , dirSigningKey  :: PublicKey
      }
@@ -83,18 +82,15 @@ newDirectoryDatabase ns logMsg defaultStrs =
              " default directories loaded.")
      DDB `fmap` newTVarIO loadedDirs
 
-getRandomDirectory :: RNG -> DirectoryDB -> STM Directory
-getRandomDirectory rng (DDB dirlsTV) =
-  withRNGSTM rng $ \ g ->
-    do ls <- readTVar dirlsTV
-       case genBytes 1 g of
-         Left _ -> retry
-         Right (bstr, g') ->
-           case uncons bstr of
-             Nothing -> retry
-             Just (x, _) ->
-               do let idx = fromIntegral x `mod` length ls
-                  return (ls !! idx, g')
+getRandomDirectory :: DRG g => g -> DirectoryDB -> STM (Directory, g)
+getRandomDirectory g (DDB dirlsTV) =
+  do ls <- readTVar dirlsTV
+     let (bstr, g') = randomBytesGenerate 1 g
+     case uncons bstr of
+       Nothing -> retry
+       Just (x, _) ->
+         do let idx = fromIntegral x `mod` length ls
+            return (ls !! idx, g')
 
 findDirectory :: ByteString -> DirectoryDB -> STM (Maybe Directory)
 findDirectory fprint (DDB dirlsTV) =

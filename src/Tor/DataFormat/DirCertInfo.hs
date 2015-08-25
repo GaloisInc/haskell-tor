@@ -6,38 +6,36 @@ module Tor.DataFormat.DirCertInfo(
        )
  where
 
-import Codec.Crypto.RSA.Pure
-import Data.Attoparsec.ByteString.Lazy
-import Data.ByteString.Lazy(ByteString)
-import qualified Data.ByteString.Lazy as BS
-import Data.Digest.Pure.SHA
-import Data.Time
+import Control.Monad
+import Crypto.Hash.Easy
+import Crypto.PubKey.RSA
+import Crypto.PubKey.RSA.PKCS15
+import Data.Attoparsec.ByteString
+import Data.ByteString(ByteString)
+import qualified Data.ByteString as BS
+import Data.Hourglass
 import Tor.DataFormat.Helpers
 
 data DirectoryCertInfo = DirectoryCertInfo {
        dcFingerprint      :: ByteString
-     , dcPublished        :: UTCTime
-     , dcExpires          :: UTCTime
+     , dcPublished        :: DateTime
+     , dcExpires          :: DateTime
      , dcIdentityKey      :: PublicKey
      , dcSigningKey       :: PublicKey
      , dcKeyCertification :: ByteString
      }
  deriving (Show)
 
+-- FIXME: Handle partial input
 parseDirectoryCertInfo :: ByteString -> Either String DirectoryCertInfo
 parseDirectoryCertInfo bstr =
   case parse dirCertInfo bstr of
     Fail bstr' _ err -> Left (err ++ "[" ++ show (BS.take 10 bstr') ++ "]")
+    Partial _        -> Left "Incomplete Directory cert info."
     Done _       res ->
-      let key = dcIdentityKey res
-          sig = dcKeyCertification res
-      in case rsassa_pkcs1_v1_5_verify hashEmpty key digest sig of
-           Left err ->
-             Left ("RSA verification failed: " ++ show err)
-           Right False ->
-             Left ("Invalid signature: " ++ show sig)
-           Right True ->
-             Right res
+      if verify noHash (dcIdentityKey res) digest (dcKeyCertification res)
+         then Right res
+         else Left "RSA verification failed."
  where
   digest = generateHash bstr
 
@@ -65,14 +63,9 @@ dirCertInfo =
      idsig                   <- signature
      _                       <- string "dir-key-certification\n"
      dcKeyCertification      <- signature
-     let digest = sha1 idbstr
-     case rsassa_pkcs1_v1_5_verify hashEmpty dcSigningKey digest idsig of
-        Left err ->
-          fail ("RSA ID key verification failed: " ++ show err)
-        Right False ->
-          fail ("RSA ID key verification failure.")
-        Right True ->
-          return DirectoryCertInfo{..}
+     unless (verify noHash dcSigningKey (sha1 idbstr) idsig) $
+       fail "RSA ID key verification failed."
+     return DirectoryCertInfo{..}
 
 signature :: Parser ByteString
 signature =
@@ -84,7 +77,3 @@ signature =
      _ <- option undefined $ string "ID "
      _ <- string "SIGNATURE-----\n"
      return bstr
-
-
-hashEmpty :: HashInfo  
-hashEmpty = HashInfo BS.empty id

@@ -8,9 +8,10 @@ module Tor.DataFormat.TorAddress(
 
 import Control.Monad
 import Data.Bits
-import Data.ByteString.Lazy(ByteString)
-import qualified Data.ByteString.Lazy as BS
-import Data.ByteString.Lazy.Char8(pack,unpack)
+import Data.ByteString(ByteString)
+import qualified Data.ByteString as BS
+import Data.ByteString.Char8(pack,unpack)
+import Data.ByteString.Lazy(toStrict)
 import Data.Binary.Get
 import Data.Binary.Put
 import Data.List(intercalate)
@@ -34,7 +35,7 @@ getTorAddress :: Get TorAddress
 getTorAddress =
   do atype <- getWord8
      len   <- getWord8
-     value <- getLazyByteString (fromIntegral len)
+     value <- getByteString (fromIntegral len)
      case (atype, len) of
        (0x00, _)  -> return (Hostname (unpack value))
        (0x04, 4)  -> return (IP4 (ip4ToString value))
@@ -65,7 +66,7 @@ putTorAddress (Hostname str) =
   do putWord8 0x00
      let bstr = pack str
      putWord8 (fromIntegral (BS.length bstr))
-     putLazyByteString bstr
+     putByteString bstr
 putTorAddress (IP4 str) =
   do putWord8 0x04
      putWord8 4
@@ -87,9 +88,9 @@ putTorAddress (NontransientError _) =
 
 torAddressByteString :: TorAddress -> ByteString
 torAddressByteString (IP4 x) = 
-  runPut (forM_ (unintercalate '.' x) (putWord8 . read))
+  toStrict (runPut (forM_ (unintercalate '.' x) (putWord8 . read)))
 torAddressByteString (IP6 x) =
-  runPut $ forM_ (unintercalate ':' (unwrapIP6 x)) $ \ v ->
+  toStrict $ runPut $ forM_ (unintercalate ':' (unwrapIP6 x)) $ \ v ->
     case readHex v of
       []        -> fail "Couldn't read IP6 addr component."
       ((w,_):_) -> putWord16be w

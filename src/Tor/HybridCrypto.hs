@@ -4,44 +4,58 @@ module Tor.HybridCrypto(
        )
  where
 
-import Codec.Crypto.RSA
-import Crypto.Cipher.AES128
+import Control.Exception
+import Crypto.Cipher.AES
+import Crypto.Cipher.Types
+import Crypto.Error
+import Crypto.Hash.Algorithms
+import Crypto.PubKey.MaskGenFunction
+import Crypto.PubKey.RSA.OAEP
+import Crypto.PubKey.RSA.Types
 import Crypto.Random
-import Crypto.Types
-import Crypto.Types.PubKey.RSA
-import Data.ByteString.Lazy(ByteString)
-import qualified Data.ByteString as BSS
-import qualified Data.ByteString.Lazy as BS
-import Data.Digest.Pure.SHA
+import Data.ByteString
+import Prelude hiding (append, length, splitAt)
 
-hybridEncrypt :: CryptoRandomGen g =>
-                 Bool -> PublicKey -> ByteString -> g ->
-                 (ByteString, g)
-hybridEncrypt force pubKey m g
-  | not force && (BS.length m < (128 - 42)) = -- PK_ENC_LEN - PK_PAD_LEN
-     encryptOAEP g sha1 (generateMGF1 sha1) BS.empty pubKey m
+hybridEncrypt :: MonadRandom m =>
+                 Bool -> PublicKey -> ByteString ->
+                 m ByteString
+hybridEncrypt force pubkey m
+  | not force && (length m < (128 - 42)) = -- PK_ENC_LEN - PK_PAD_LEN
+      failLeft (encrypt oaepParams pubkey m)
   | otherwise =
-         -- Generate a KEY_LEN byte random key K;
-     let (k, g') = throwLeft (genBytes 16 g)
+      do -- Generate a KEY_LEN byte random key K;
+         kbs <- getRandomBytes 16
          -- let M1 = the first PK_ENC_LEN - PK_PAD_LEN - KEY_LEN bytes of M
          -- and let M2 = the rest of M.
-         (m1, m2) = BS.splitAt (128 - 42 - 16) m
+         let (m1, m2) = splitAt (128 - 42 - 16) m
          -- pad and encrypt K|M1 with PK
-         (ekm1, g'') = encryptOAEP g' sha1 (generateMGF1 sha1) BS.empty pubKey
-                                   (BS.fromStrict k `BS.append` m1)
+         ekm1 <- failLeft (encrypt oaepParams pubkey (kbs `append` m1))
          -- encrypt M2 with our stream cipher, using the key K
-         Just key = buildKey k :: Maybe AESKey128
-         (em2, _) = ctrLazy key (IV (BSS.replicate 16 0))  m2
-      in (ekm1 `BS.append` em2, g'')
+         let key = throwCryptoError (cipherInit kbs) :: AES128
+             em2 = ctrCombine key nullIV m2
+         return (ekm1 `append` em2)
 
-hybridDecrypt :: PrivateKey -> ByteString -> ByteString
+hybridDecrypt :: MonadRandom m =>
+                 PrivateKey -> ByteString ->
+                 m ByteString
 hybridDecrypt privKey em
-  | BS.length em <= fromIntegral (private_size privKey) =
-      decryptOAEP sha1 (generateMGF1 sha1) BS.empty privKey em
+  | length em <= fromIntegral (private_size privKey) =
+      failLeft (decryptSafer oaepParams privKey em)
   | otherwise =
-     let (ekm1, em2) = BS.splitAt (fromIntegral (private_size privKey)) em
-         km1 = decryptOAEP sha1 (generateMGF1 sha1) BS.empty privKey ekm1
-         (k, m1) = BS.splitAt 16 km1
-         Just key = buildKey (BS.toStrict k) :: Maybe AESKey128
-         (m2, _) = unCtrLazy key (IV (BSS.replicate 16 0)) em2
-     in m1 `BS.append` m2
+      do let (ekm1, em2) = splitAt (fromIntegral (private_size privKey)) em
+         km1 <- failLeft (decryptSafer oaepParams privKey ekm1)
+         let (kbs, m1) = splitAt 16 km1
+             key       = throwCryptoError (cipherInit kbs) :: AES128
+             m2        = ctrCombine key nullIV em2
+         return (m1 `append` m2)
+
+oaepParams :: OAEPParams SHA1 ByteString ByteString
+oaepParams = OAEPParams SHA1 (mgf1 SHA1) Nothing
+
+failLeft :: (Show a, Monad m) => m (Either a b) -> m b
+failLeft action =
+  do v <- action
+     case v of
+       Left err ->
+         fail ("Received unexpected left value (HybridCrypto): " ++ show err)
+       Right v  -> return v

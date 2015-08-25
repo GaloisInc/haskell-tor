@@ -1,43 +1,45 @@
+{-# LANGUAGE RecordWildCards #-}
 import Control.Concurrent(forkIO,threadDelay)
 import Control.Exception
 import Control.Monad
-import Crypto.Types.PubKey.RSA
+import Crypto.Number.Basic
+import Crypto.PubKey.RSA
 import Data.ASN1.BinaryEncoding
 import Data.ASN1.Encoding
 import Data.ASN1.Types
-import Data.ByteString.Base64.Lazy(decode)
-import Data.ByteString.Lazy.Char8(pack)
+import Data.ByteArray.Encoding
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BSC
+import Data.ByteString.Base64
+import Data.ByteString.Char8(pack)
+import Data.Hourglass
+import Data.Hourglass.Now
 import Data.List
-import Data.Time
 import Data.Word
-import Network.Socket hiding (recv)
+import Data.X509
+import Network.TLS
 import System.IO
-import System.Locale
+import Tor.DataFormat.TorAddress
 import Tor.Circuit
 import Tor.DataFormat.TorCell
+import Tor.Link
+import Tor.NetworkStack
 import Tor.NetworkStack.System
 import Tor.Options
 import Tor.RouterDesc
 import Tor.State
+import Debug.Trace
 
--- -----------------------------------------------------------------------------
+main :: IO ()
+main = runDefaultMain $ \ flags ->
+  do logger        <- generateLogger flags
+     let onionPort =  getOnionPort flags
+     torState      <- initializeTorState systemNetworkStack logger flags
+     startTorServerPort torState onionPort
+     buildCircularCircuit torState
+     forever (threadDelay 100000000)
 
-getRouter' :: a -> b -> IO RouterDesc
-getRouter' _ _ =
-  do str <- readFile "/Users/awick/.tor/keys/secret_onion_key"
-     let Right bstr = decode (pack (concat (init (tail (lines str)))))
-     let Right asn1s = decodeASN1 DER bstr
-     case fromASN1 asn1s of
-       Left err -> fail ("ASN1 decode error: " ++ err)
-       Right (x, _) ->
-         return RouterDesc {
-           routerNickname    = "localhost"
-         , routerIPv4Address = "127.0.0.1"
-         , routerORPort      = 9001
-         , routerOnionKey    = private_pub x
-         }
-
-buildCircularCircuit :: TorState ls s -> IO ()
+buildCircularCircuit :: HasBackend s => TorState ls s -> IO ()
 buildCircularCircuit torState = catch tryCircular notPublic
  where
   notPublic :: SomeException -> IO ()
@@ -54,35 +56,43 @@ buildCircularCircuit torState = catch tryCircular notPublic
        midRouter  <- getRouter torState [NotRouter initRouter]
        putStrLn ("Extending router to " ++ routerIPv4Address midRouter)
        ()         <- throwLeft =<< extendCircuit torState circ midRouter
-       myDesc     <- getRouter torState [NotRouter initRouter, NotRouter midRouter]
-       putStrLn ("Extending router to " ++ routerIPv4Address myDesc)
-       ()         <- throwLeft =<< extendCircuit torState circ myDesc
-       logMsg torState ("Cycle circuit created. Yay! Closing it.")
+       lastRouter <- getRouter torState [NotRouter initRouter,
+                                         NotRouter midRouter,
+                                         NotTorAddr (IP4 "37.49.35.221"),
+                                         NotTorAddr (IP4 "62.210.74.143"),
+                                         NotTorAddr (IP4 "162.248.160.151"),
+                                         NotTorAddr (IP4 "109.235.50.163"),
+                                         ExitNodeAllowing (IP4 "66.193.37.213") 80]
+       putStrLn ("Extending router to " ++ routerIPv4Address lastRouter)
+       ()         <- throwLeft =<< extendCircuit torState circ lastRouter
+       nms        <- resolveName circ "galois.com"
+       putStrLn ("Resolved galois.com to " ++ show nms)
+       putStrLn ("Exit rules: " ++ show (routerExitRules lastRouter))
+       con        <- connectToHost circ (Hostname "uhsure.com") 80
+       putStrLn ("Built connection!")
+       torWrite con (buildGet "http://uhsure.com/")
+       putStrLn ("Wrote GET")
+       resp <- torRead con 300
+       putStrLn ("Got response: " ++ show resp)
        destroyCircuit circ NoReason
+  --
+  buildGet str = result
+   where
+    result      = pack (requestLine ++ userAgent ++ crlf)
+    requestLine = "GET " ++ str ++ " HTTP/1.0\r\n"
+    userAgent   = "User-Agent: CERN-LineMode/2.15 libwww/2.17b3\r\n"
+    crlf        = "\r\n"
 
 
-main :: IO ()
-main = runDefaultMain $ \ flags ->
-  do logger        <- generateLogger flags
-     let onionPort =  getOnionPort flags
-     torState      <- initializeTorState systemNetworkStack logger flags
-     _             <- forkIO (torServerPort torState onionPort)
-     buildCircularCircuit torState
-     forever (threadDelay 100000000)
-
-torServerPort :: TorState a b -> Word16 -> IO ()
-torServerPort torState onionPort =
-  do lsock <- socket AF_INET Stream defaultProtocol
-     bind lsock (SockAddrInet (PortNum onionPort) iNADDR_ANY)
-     listen lsock 3
+startTorServerPort :: HasBackend sock => TorState lsock sock -> Word16 -> IO ()
+startTorServerPort torState onionPort =
+  do let ns = getNetworkStack torState
+     lsock <- listen ns onionPort
      logMsg torState ("Waiting for Tor connections on port " ++ show onionPort)
-     forever $ do (sock, addr) <- accept lsock
-                  logMsg torState ("Accepted TCP connection from " ++ show addr)
-                  forkIO (runServerConnection torState sock)
-
-runServerConnection :: TorState a b -> Socket -> IO ()
-runServerConnection torState sock =
-  do undefined torState sock
+     _ <- forkIO $ forever $
+       do (sock, addr) <- accept ns lsock
+          forkIO (acceptIncomingLink torState sock addr)
+     return ()
 
 -- -----------------------------------------------------------------------------
 
@@ -94,8 +104,12 @@ generateLogger (_:rest)           = generateLogger rest
 makeLogger :: Handle -> String -> IO ()
 makeLogger h msg =
   do now <- getCurrentTime
-     let tstr = formatTime defaultTimeLocale "[%d%b%Y %X] " now
-     hPutStrLn h (tstr ++ msg)
+     hPutStrLn h (timePrint timeFormat now ++ msg)
+ where
+  timeFormat = [Format_Text '[', Format_Year4, Format_Text '-', Format_Month2,
+                Format_Text '-', Format_Day2, Format_Text ' ', Format_Hour,
+                Format_Text ':', Format_Minute, Format_Text ']',
+                Format_Text ' ']
 
 throwLeft :: Either String b -> IO b
 throwLeft (Left s)  = fail s

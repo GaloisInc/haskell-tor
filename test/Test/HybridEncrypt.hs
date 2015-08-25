@@ -1,19 +1,20 @@
 module Test.HybridEncrypt(hybridEncryptionTest)
  where
 
-import Codec.Crypto.RSA
+import Crypto.PubKey.RSA
 import Control.Applicative
 import Control.Monad
-import Crypto.Random.DRBG
-import Data.ByteString.Lazy(ByteString,pack)
-import qualified Data.ByteString.Lazy as BS
+import Crypto.Random
+import Data.ByteString(ByteString,pack)
+import qualified Data.ByteString as BS
 import Test.Framework
 import Test.Framework.Providers.QuickCheck2
 import Test.QuickCheck
 import Test.Standard
+import Tor.State.Credentials
 import Tor.HybridCrypto
 
-data InputValues = Input PublicKey PrivateKey ByteString HashDRBG
+data InputValues = Input PublicKey PrivateKey ByteString ChaChaDRG
 
 instance Eq InputValues where
   (Input pub priv bstr _) == (Input pub' priv' bstr' _) =
@@ -33,8 +34,8 @@ instance Arbitrary InputValues where
 prop_hybridEncWorks :: Bool -> InputValues -> Property
 prop_hybridEncWorks force (Input pub priv m g) =
   (not force || (BS.length m > 70)) ==>
-    let (em, _) = hybridEncrypt force pub m g
-        m' = hybridDecrypt priv em
+    let (m', _) = withDRG g (do em <- hybridEncrypt force pub m
+                                hybridDecrypt priv em)
     in m == m'
 
 hybridEncryptionTest :: Test
