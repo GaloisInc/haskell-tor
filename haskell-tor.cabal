@@ -35,7 +35,6 @@ library
                       containers                 >= 0.5   && < 0.7,
                       cryptonite                 >= 0.6   && < 0.8,
                       fingertree                 >= 0.1   && < 0.3,
-                      HALVMCore                  >= 2.0   && < 2.4,
                       hourglass                  >= 0.2.9 && < 0.4,
                       memory                     >= 0.7   && < 0.9,
                       monadLib                   >= 3.7   && < 3.9,
