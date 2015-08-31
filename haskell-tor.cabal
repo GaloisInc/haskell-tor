@@ -11,9 +11,15 @@ build-type:          Simple
 extra-source-files:  README.mkd
 cabal-version:       >=1.10
 
+Flag network
+  Description:        Use the base network library
+
+Flag hans
+  Description:        Use the Haskell Network Stack (HaNS)
+
 library
   default-language:   Haskell2010
-  ghc-options:        -Wall
+  ghc-options:        -Wall -threaded
   hs-source-dirs:     src
 
   build-depends:
@@ -23,16 +29,16 @@ library
                       attoparsec                 >= 0.13  && < 0.15,
                       base                       >= 4.7   && < 5.0,
                       base64-bytestring          >= 1.0   && < 1.2,
-                      binary                     >= 0.7.6 && < 0.9,
+                      binary                     >= 0.7.1 && < 0.9,
                       bytestring                 >= 0.10  && < 0.11,
                       cereal                     >= 0.4   && < 0.6,
                       containers                 >= 0.5   && < 0.7,
                       cryptonite                 >= 0.6   && < 0.8,
                       fingertree                 >= 0.1   && < 0.3,
+                      HALVMCore                  >= 2.0   && < 2.4,
                       hourglass                  >= 0.2.9 && < 0.4,
                       memory                     >= 0.7   && < 0.9,
                       monadLib                   >= 3.7   && < 3.9,
-                      network                    >= 2.5   && < 2.7,
                       pretty-hex                 >= 1.0   && < 1.2,
                       pure-zlib                  >= 0.3   && < 0.5,
                       stm                        >= 2.4   && < 2.6,
@@ -62,7 +68,6 @@ library
                       Tor.Link.DH,
                       Tor.Link.CipherSuites,
                       Tor.NetworkStack.Fetch,
-                      Tor.NetworkStack.System,
                       Tor.NetworkStack,
                       Tor.Options,
                       Tor.RouterDesc.Render,
@@ -72,10 +77,17 @@ library
                       Tor.State.Routers,
                       Tor.State
 
+  if flag(network)
+    build-depends:    network                    >= 2.5   && < 2.7
+    exposed-modules:  Tor.NetworkStack.System
+  if flag(hans)
+    build-depends:    hans                       >= 2.6   && < 2.8
+    exposed-modules:  Tor.NetworkStack.Hans
+
 executable haskell-tor
   main-is:            Main.hs
   default-language:   Haskell2010
-  ghc-options:        -Wall
+  ghc-options:        -Wall -threaded
   build-depends:
                       asn1-encoding              >= 0.8   && < 0.10,
                       asn1-types                 >= 0.2   && < 0.4,
@@ -86,10 +98,15 @@ executable haskell-tor
                       haskell-tor                >= 0.1   && < 0.3,
                       hourglass                  >= 0.2.9 && < 0.4,
                       memory                     >= 0.7   && < 0.9,
-                      network                    >= 2.5   && < 2.7,
                       time                       >= 1.4   && < 1.6,
                       tls                        >= 1.3.2 && < 1.5,
                       x509                       >= 1.6   && < 1.8
+  if os(HaLVM)
+    build-depends:    hans                       >= 2.6   && < 2.8,
+                      HALVMCore                  >= 2.0   && < 2.4,
+                      XenDevice                  >= 2.0   && < 2.4
+  else
+    build-depends:    network                    >= 2.5   && < 2.7
 
 test-suite test-tor
   type:               exitcode-stdio-1.0
