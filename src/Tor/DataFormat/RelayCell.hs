@@ -12,7 +12,7 @@ module Tor.DataFormat.RelayCell(
 import Control.Applicative
 import Control.Exception
 import Control.Monad
-import Crypto.Hash
+import Crypto.Hash hiding (hash)
 import Data.Attoparsec.ByteString
 import Data.Binary.Get
 import Data.Binary.Put
@@ -368,6 +368,7 @@ parseAddrPort bstr =
     Data.Attoparsec.ByteString.Partial f    ->
      case f BS.empty of
        Data.Attoparsec.ByteString.Fail _ _ err -> fail err
+       Data.Attoparsec.ByteString.Partial _    -> fail "Not enough input"
        Data.Attoparsec.ByteString.Done _   res -> return res
     Data.Attoparsec.ByteString.Done _   res -> return res
  where

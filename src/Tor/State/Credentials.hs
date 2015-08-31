@@ -242,4 +242,4 @@ sleepFor :: TimeInterval t => t -> IO ()
 sleepFor dur =
    do putStrLn ("Should sleepFor " ++ show secs ++ " seconds.")
       threadDelay (fromIntegral (toSeconds dur) * 1000000)
- where secs = fromIntegral (toSeconds dur)
+ where secs = fromIntegral (toSeconds dur) :: Integer

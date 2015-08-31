@@ -490,7 +490,7 @@ xorStream k = BSL.fromChunks (go 0)
   go :: Integer -> [ByteString]
   go x = ecbEncrypt k (i2ospOf_ 16 x) : go (plus1' x)
   --
-  plus1' x = (x + 1) `mod` (2 ^ 128)
+  plus1' x = (x + 1) `mod` (2 ^ (128 :: Integer))
 
 xorBS :: ByteString -> ByteString -> ByteString
 xorBS a b = BS.pack (BS.zipWith xor a b)

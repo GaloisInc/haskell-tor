@@ -4,7 +4,6 @@ module Tor.HybridCrypto(
        )
  where
 
-import Control.Exception
 import Crypto.Cipher.AES
 import Crypto.Cipher.Types
 import Crypto.Error
@@ -14,7 +13,7 @@ import Crypto.PubKey.RSA.OAEP
 import Crypto.PubKey.RSA.Types
 import Crypto.Random
 import Data.ByteString
-import Prelude hiding (append, length, splitAt)
+import Prelude hiding (length, splitAt)
 
 hybridEncrypt :: MonadRandom m =>
                  Bool -> PublicKey -> ByteString ->
@@ -58,4 +57,4 @@ failLeft action =
      case v of
        Left err ->
          fail ("Received unexpected left value (HybridCrypto): " ++ show err)
-       Right v  -> return v
+       Right x  -> return x
