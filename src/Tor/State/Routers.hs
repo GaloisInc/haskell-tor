@@ -7,25 +7,22 @@ module Tor.State.Routers(
        )
  where
 
-import Control.Applicative
 import Control.Concurrent
-import Control.Concurrent.STM
 import Control.Monad
 import Crypto.Hash.Easy
-import Crypto.PubKey.RSA.KeyHash
 import Crypto.PubKey.RSA.PKCS15
 import Crypto.Random
-import Data.Array.Base
+import Data.Array
 import Data.Bits
 import Data.Serialize.Get
 import Data.ByteString(ByteString,unpack)
 import Data.Hourglass
 import Data.Hourglass.Now
 import Data.List
-import Data.Map.Strict(Map)
 import qualified Data.Map.Strict as Map
 import Data.Maybe
 import Data.Word
+import MonadLib
 import Tor.DataFormat.Consensus
 import Tor.DataFormat.TorAddress
 import Tor.NetworkStack
@@ -34,19 +31,12 @@ import Tor.RNG
 import Tor.RouterDesc
 import Tor.State.Directories
 
-newtype RouterDB = RouterDB (TVar RouterDBVersion)
+newtype RouterDB = RouterDB (MVar RouterDBVersion)
 
 data RouterDBVersion = RDB {
        rdbRevision      :: Word
-     , rdbDirectoryIP   :: String
-     , rdbDirectoryPort :: Word16
-     , rdbRoutersPulled :: TVar Word
-     , rdbRouters       :: TArray Word RouterEntry
+     , rdbRouters       :: Array Word RouterDesc
      }
-
-data RouterEntry = Unfetched Router
-                 | Broken
-                 | Fetched RouterDesc
 
 data RouterRestriction = IsStable -- ^Marked with the Stable flag
                        | NotRouter RouterDesc -- ^Is not the given router
@@ -64,58 +54,47 @@ newRouterDatabase :: TorNetworkStack ls s ->
                      DirectoryDB -> (String -> IO ()) ->
                      IO RouterDB
 newRouterDatabase ns ddb logMsg =
-  do let rdbRevision      = 0
-         rdbDirectoryIP   = ""
-         rdbDirectoryPort = 0
-     rdbRoutersPulled     <- newTVarIO 0
-     rdbRouters           <- atomically $ newArray (0,0) Broken
-     let rdb = RDB{ .. }
-     retval <- newTVarIO rdb
-     _ <- forkIO (updateConsensus    ns ddb logMsg retval)
-     return (RouterDB retval)
+  do rdbMV <- newEmptyMVar
+     _ <- forkIO (updateConsensus ns ddb logMsg rdbMV)
+     return (RouterDB rdbMV)
 
 -- |Fetch a router matching the given restrictions. The restrictions list should
 -- be thought of an "AND" with a default of True given the empty list. This
 -- routine may take awhile to find a suitable entry if the restrictions are
 -- cumbersome or if the database is being reloaded.
 getRouter :: RouterDB -> [RouterRestriction] -> TorRNG ->
-             STM (RouterDesc, TorRNG)
+             IO (TorRNG, RouterDesc)
 getRouter (RouterDB routerDB) restrictions rng =
-  do curdb <- readTVar routerDB
-     entriesGotten      <- readTVar (rdbRoutersPulled curdb)
-     (_, entriesPossib) <- getBounds (rdbRouters curdb)
-     when (entriesGotten < (2 * (entriesPossib `div` 10))) $ retry
+  do curdb              <- readMVar routerDB
+     let (_, entriesPossib) = bounds (rdbRouters curdb)
      loop (rdbRouters curdb) (entriesPossib + 1) rng
  where
-  loop :: TArray Word RouterEntry -> Word -> TorRNG -> STM (RouterDesc, TorRNG)
   loop entries idxMod g =
     do let (randBS, g') = randomBytesGenerate 8 g
-       randWord <- fromIntegral <$> runGetSTM getWord64be randBS
-       v <- readArray entries (randWord `mod` idxMod)
+       randWord <- fromIntegral <$> runGetIO getWord64be randBS
+       let v = entries ! (randWord `mod` idxMod)
        case v `meetsRestrictions` restrictions of
          Nothing -> loop entries idxMod g'
-         Just v' -> return (v', g')
+         Just v' -> return (g', v')
   --
-  runGetSTM getter bstr =
+  runGetIO getter bstr =
     case runGet getter bstr of
-      Left  _ -> retry
+      Left  _ -> fail "Cannot read 64-bit Word from 64 bytes ..."
       Right x -> return x
   --
-  meetsRestrictions   (Unfetched _) _        = Nothing
-  meetsRestrictions    Broken       _        = Nothing
-  meetsRestrictions   (Fetched rtr) []       = Just rtr
-  meetsRestrictions x@(Fetched rtr) (r:rest) =
+  meetsRestrictions rtr []       = Just rtr
+  meetsRestrictions rtr (r:rest) =
     case r of
-      IsStable | "Stable" `elem` routerStatus rtr  -> meetsRestrictions x rest
+      IsStable | "Stable" `elem` routerStatus rtr  -> meetsRestrictions rtr rest
                | otherwise                         -> Nothing
       NotRouter rdesc | isSameRouter rtr rdesc     -> Nothing
-                      | otherwise                  -> meetsRestrictions x rest
+                      | otherwise                  -> meetsRestrictions rtr rest
       NotTorAddr taddr | isSameAddr taddr rtr      -> Nothing
-                       | otherwise                 -> meetsRestrictions x rest
-      ExitNode | allowsExits (routerExitRules rtr) -> meetsRestrictions x rest
+                       | otherwise                 -> meetsRestrictions rtr rest
+      ExitNode | allowsExits (routerExitRules rtr) -> meetsRestrictions rtr rest
                | otherwise                         -> Nothing
       ExitNodeAllowing a p
-            | allowsExit (routerExitRules rtr) a p -> meetsRestrictions x rest
+            | allowsExit (routerExitRules rtr) a p -> meetsRestrictions rtr rest
             | otherwise                            -> Nothing
   --
   isSameRouter r1 r2 = routerSigningKey r1 == routerSigningKey r2
@@ -180,107 +159,71 @@ getRouter (RouterDB routerDB) restrictions rng =
 -- |The thread that updates the consensus document over time.
 updateConsensus :: TorNetworkStack ls s ->
                    DirectoryDB -> (String -> IO ()) ->
-                   TVar RouterDBVersion ->
+                   MVar RouterDBVersion ->
                    IO ()
-updateConsensus ns ddb logMsg rdbTV = runUpdate =<< drgNew
+updateConsensus ns ddb logMsg rdbMV = runUpdates =<< drgNew
  where
-  runUpdate rng =
-    do logMsg ("Starting consensus document update.")
-       (dir, rng') <- atomically (getRandomDirectory rng ddb)
-       logMsg ("Using directory " ++ dirNickname dir ++ " for consensus.")
-       mc <- fetch ns (dirAddress dir) (dirDirPort dir) ConsensusDocument
-       case mc of
-         Left err ->
-           do logMsg ("Couldn't get consensus document: " ++ err)
-              logMsg ("Retrying.")
-              runUpdate rng'
-         Right (consensus, sha1dig, sha256dig) ->
-           do let sigs = conSignatures consensus
-              forM_ (conAuthorities consensus) (addDirectory ns logMsg ddb)
-              validSigs <- getValidSignatures ddb sha1dig sha256dig sigs
-              if length validSigs < 5
-                 then do logMsg ("Couldn't find 5 valid signatures. Retrying.")
-                         runUpdate rng'
-                 else do logMsg ("Found 5 or more valid signatures: " ++
-                                 intercalate ", " validSigs)
-                         rdb <- atomically $
-                           do curVersion <- rdbRevision <$> readTVar rdbTV
-                              let revision' = curVersion + 1
-                                  routers   = filter goodRouter
-                                                (conRouters consensus)
-                                  num       = fromIntegral (length routers)
-                                  addr      = dirAddress dir
-                                  port      = dirDirPort dir
-                              cnt <- newTVar 0
-                              arr <- newListArray (0, num - 1)
-                                                  (map Unfetched routers)
-                              let rdb = RDB revision' addr port cnt arr
-                              writeTVar rdbTV rdb
-                              return rdb
-                         _ <- forkIO (translateConsensus ns logMsg rdb)
-                         let (nextTime, rng'') = computeNextTime consensus rng'
-                         logMsg ("Will reload consensus at "++showTime nextTime)
-                         waitUntil nextTime
-                         logMsg "Consensus expired. Reloading."
-                         runUpdate rng''
+  runUpdates g =
+    do (res, g') <- runStateT g (runExceptionT update)
+       case res of
+         Right () -> return ()
+         Left err -> logMsg ("Issue updating consensus document: " ++ err)
+       runUpdates g'
+  --
+  update :: ExceptionT String (StateT TorRNG IO) ()
+  update =
+    do logMsg' "String consensus document update."
+       dir <- withRNG (\ g -> inBase (getRandomDirectory g ddb))
+       logMsg' ("Using directory " ++ dirNickname dir ++ " for consensus.")
+       let addr = dirAddress dir ; port = dirDirPort dir
+       (census, sha1dig, sha256dig) <- fetch' addr port ConsensusDocument
+       let sigs = conSignatures census
+       forM_ (conAuthorities census) (inBase . addDirectory ns logMsg ddb)
+       validSigs <- inBase (getValidSignatures ddb sha1dig sha256dig sigs)
+       when (length validSigs < 5) $
+         raise "Couldn't get at least 5 valid signantures on consensus."
+       logMsg' ("Found enough valid signatures: " ++ intercalate ", " validSigs)
+       rdtable <- fetch' addr port Descriptors
+       let routers = filter goodRouter (conRouters census)
+       let table' = mapMaybe (crossReference rdtable) routers
+       logMsg' ("New router processing complete. " ++ show (length table') ++
+                " of " ++ show (length rdtable) ++ " routers available.")
+       oldRdb <- inBase (tryTakeMVar rdbMV)
+       let rev = maybe 1 (succ . rdbRevision) oldRdb
+           arr = listArray (0, fromIntegral (length table' - 1)) table'
+       inBase (putMVar rdbMV (RDB rev arr))
+       nextTime <- withRNG (return . computeNextTime census)
+       logMsg' ("Will reload census at "++showTime nextTime)
+       inBase $ waitUntil nextTime
+       logMsg' "Consensus expired. Reloading."
+  --
+  crossReference rdtable rtr =
+    case Map.lookup (rtrIdentity rtr) rdtable of
+      Nothing -> Nothing
+      Just d  -> Just d{ routerStatus = rtrStatus rtr }
+  --
+  fetch' :: Fetchable a =>
+            String -> Word16 -> FetchItem ->
+            ExceptionT String (StateT TorRNG IO) a
+  fetch' a p d =
+    do m <- inBase (fetch ns a p d)
+       case m of
+         Left err -> raise ("Couldn't get " ++ show d ++ ": " ++ err)
+         Right x  -> return x
+  --
+  withRNG :: (TorRNG -> IO (a, TorRNG)) -> ExceptionT String (StateT TorRNG IO) a
+  withRNG action =
+    do g <- get
+       (res, g') <- inBase (action g)
+       set g'
+       return res
+  --
+  logMsg' = inBase . logMsg
   --
   goodRouter r =
     let s = rtrStatus r
     in ("Valid" `elem` s) && ("Running" `elem` s) && ("Fast" `elem` s)
   showTime = timePrint [Format_Hour, Format_Text ':', Format_Minute]
-
-
--- |The consensus document we get from our directory servers is handy, but
--- doesn't contain all the information we need. This function goes through all
--- the entries and updates them with better data. This function is launched as a
--- thread whenever a new consensus document is created.
-translateConsensus :: TorNetworkStack ls s -> (String -> IO ()) ->
-                      RouterDBVersion ->
-                      IO ()
-translateConsensus ns logMsg rdb =
-  do (minIdx, maxIdx) <- atomically (getBounds arr)
-     logMsg "Downloading router descriptors."
-     mtable <- fetch ns (rdbDirectoryIP rdb) (rdbDirectoryPort rdb) Descriptors
-     case mtable of
-       Left err ->
-         do logMsg ("Failed to get router descriptors: " ++ err)
-            translateConsensus ns logMsg rdb
-       Right table ->
-         do logMsg "Loading router descriptor table."
-            run minIdx maxIdx table
- where
-  run startIdx maxIdx table
-    | startIdx > maxIdx =
-        do cnt <- atomically (readTVar (rdbRoutersPulled rdb))
-           logMsg ("Router descriptor table complete. " ++ show cnt ++
-                   " of " ++ show maxIdx ++ " routers available.")
-    | otherwise         =
-        do join $ atomically $ processEntry startIdx table
-           when ((startIdx `mod` 500) == 0) $
-             do let percD = fromIntegral startIdx / fromIntegral maxIdx :: Double
-                    perc  = round (100 * percD)
-                logMsg ("Fetched " ++ show (perc :: Int) ++ "% of " ++
-                        show (maxIdx + 1) ++ " router entries.")
-           run (succ startIdx) maxIdx table
-  --
-  processEntry x table =
-    do cur <- readArray arr x
-       case cur of
-         Unfetched rtr ->
-           case Map.lookup (rtrIdentity rtr) table of
-             Nothing ->
-               do writeArray arr x Broken
-                  return (return ())
-             Just d ->
-               do writeArray arr x (Fetched d{routerStatus = rtrStatus rtr})
-                  modifyTVar' (rdbRoutersPulled rdb) succ
-                  return (return ())
-         Broken ->
-           return (logMsg "Internal Error: Broken during translate.")
-         Fetched _ ->
-           return (logMsg "Internal Error: Fetched during translate.")
-  --
-  arr = rdbRouters rdb
 
 getValidSignatures :: DirectoryDB -> ByteString -> ByteString ->
                       [(Bool, ByteString, ByteString, ByteString)] ->
@@ -288,7 +231,7 @@ getValidSignatures :: DirectoryDB -> ByteString -> ByteString ->
 getValidSignatures ddb sha1dig sha256dig sigs =
   catMaybes <$>
     (forM sigs $ \ (isSHA1, ident, _, sig) ->
-       do mdir <- atomically (findDirectory ident ddb)
+       do mdir <- findDirectory ident ddb
           -- FIXME: Do something more useful in the failure cases?
           case mdir of
             Nothing -> return Nothing

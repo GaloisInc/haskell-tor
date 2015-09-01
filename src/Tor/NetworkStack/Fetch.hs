@@ -2,6 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Tor.NetworkStack.Fetch(
          FetchItem(..)
+       , Fetchable
        , fetch
        )
  where

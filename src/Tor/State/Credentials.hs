@@ -1,7 +1,5 @@
-{-# LANGUAGE ImpredicativeTypes #-}
-{-# LANGUAGE MultiWayIf         #-}
-{-# LANGUAGE OverloadedStrings  #-}
-{-# LANGUAGE RecordWildCards    #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards   #-}
 module Tor.State.Credentials(
          Credentials
        , createCertificate
@@ -15,8 +13,6 @@ module Tor.State.Credentials(
  where
 
 import Control.Concurrent
-import Control.Concurrent.STM
-import Control.Monad
 import Crypto.Hash
 import Crypto.Hash.Easy
 import Crypto.PubKey.RSA
@@ -26,160 +22,120 @@ import Data.ASN1.OID
 import Data.ByteString(ByteString)
 import Data.Hourglass
 import Data.Hourglass.Now
-import Data.Monoid
 import Data.String
-import Data.Word
 import Data.X509
 import Hexdump
 import Tor.RNG
 
-data CredentialState = NextCheckAt DateTime | Regenerating
-  deriving (Eq)
+data CredentialState = CredentialState {
+                         credRNG           :: TorRNG
+                       , credNextSerialNum :: Integer
+                       , credIdentity      :: (SignedCertificate, PrivKey)
+                       , credOnion         :: (SignedCertificate, PrivKey)
+                       , credTLS           :: (SignedCertificate, PrivKey)
+                       }
 
-data Credentials = Credentials {
-       tsCredentialState :: TVar CredentialState
-     , tsNextSerialNum   :: TVar Word
-     , tsIdentityCreds   :: TVar (SignedCertificate, PrivKey)
-     , tsOnionCreds      :: TVar (SignedCertificate, PrivKey)
-     , tsTLSCreds        :: TVar (SignedCertificate, PrivKey)
-     }
+newtype Credentials = Credentials (MVar CredentialState)
 
 newCredentials :: (String -> IO ()) -> IO Credentials
 newCredentials logMsg =
-  do g <- drgNew
+  do g   <- drgNew
      now <- getCurrentTime
-     let (idc, onc, tlsc, checkAt, g') = regenerateAllKeys g now
-     tsCredentialState <- newTVarIO (NextCheckAt checkAt)
-     tsNextSerialNum   <- newTVarIO 105
-     tsIdentityCreds   <- newTVarIO idc
-     tsOnionCreds      <- newTVarIO onc
-     tsTLSCreds        <- newTVarIO tlsc
-     let creds = Credentials{..}
+     let s = generateState g now
+     creds <- Credentials `fmap` newMVar s
      logMsg "Credentials created."
-     logMsg ("  Signing key fingerprint: " ++ (showFingerprint idc))
-     logMsg ("  Onion key fingerprint:   " ++ (showFingerprint onc))
-     logMsg ("  TLS key fingerprint:     " ++ (showFingerprint tlsc))
-     _ <- forkIO (do sleepFor (timeDiff now checkAt)
-                     runCredentialsCheck logMsg creds g')
+     logMsg ("  Signing key fingerprint: " ++ (showFingerprint (credIdentity s)))
+     logMsg ("  Onion key fingerprint:   " ++ (showFingerprint (credOnion s)))
+     logMsg ("  TLS key fingerprint:     " ++ (showFingerprint (credTLS s)))
      return creds
  where
   -- FIXME: probably should use a real fingerprint.
   showFingerprint c =
     filter (/= ' ') (simpleHex (sha1 (getSignedData (fst c))))
 
-getSigningKey :: Credentials -> STM (SignedCertificate, PrivKey)
-getSigningKey = readTVar . tsIdentityCreds
+getSigningKey :: Credentials -> IO (SignedCertificate, PrivKey)
+getSigningKey = getCredentials credIdentity
 
-getOnionKey :: Credentials -> STM (SignedCertificate, PrivKey)
-getOnionKey = getCredentials tsOnionCreds
+getOnionKey :: Credentials -> IO (SignedCertificate, PrivKey)
+getOnionKey = getCredentials credOnion
 
-getTLSKey :: Credentials -> STM (SignedCertificate, PrivKey)
-getTLSKey = getCredentials tsTLSCreds
+getTLSKey :: Credentials -> IO (SignedCertificate, PrivKey)
+getTLSKey = getCredentials credTLS
 
-getCredentials :: (Credentials -> TVar (SignedCertificate, PrivKey)) ->
+getCredentials :: (CredentialState -> (SignedCertificate, PrivKey)) ->
                   Credentials ->
-                  STM (SignedCertificate, PrivKey)
-getCredentials getter creds =
-  do state <- readTVar (tsCredentialState creds)
-     when (state == Regenerating) retry
-     readTVar (getter creds)
+                  IO (SignedCertificate, PrivKey)
+getCredentials getter (Credentials stateMV) =
+  do state  <- takeMVar stateMV
+     now    <- getCurrentTime
+     let state' = updateKeys state now
+     putMVar stateMV $! state'
+     return (getter state')
 
-runCredentialsCheck :: (String -> IO ()) -> Credentials -> TorRNG -> IO ()
-runCredentialsCheck logMsg creds rng =
-  do now <- getCurrentTime
-     action <- atomically $
-       do state <- readTVar (tsCredentialState creds)
-          case state of
-            Regenerating ->
-              return (\ g -> do logMsg "ERROR: Regenerating in bad state."
-                                sleepFor (mempty{ durationMinutes = 5 })
-                                return g)
-            NextCheckAt t | t <= now ->
-              do writeTVar (tsCredentialState creds) Regenerating
-                 return (updateCredentials now)
-            NextCheckAt t ->
-              return (\ g -> do sleepFor (timeDiff now t)
-                                return g)
-     rng' <- action rng
-     runCredentialsCheck logMsg creds rng'
+generateState :: TorRNG -> DateTime -> CredentialState
+generateState rng now = s3
  where
-  updateCredentials now g =
-    do (msg, g') <- atomically (regenerateCertsFor creds now g)
-       logMsg msg
-       return g'
+  s0      = CredentialState rng 100 undefined undefined undefined
+  (s1, _) = maybeRegenId    True now s0
+  (s2, _) = maybeRegenOnion True now s1
+  (s3, _) = maybeRegenTLS   True now s2
 
-regenerateCertsFor :: Credentials -> DateTime -> TorRNG -> STM (String, TorRNG)
-regenerateCertsFor st now rng =
-  do (idcert, _) <- readTVar (tsIdentityCreds st)
-     (oncert, _) <- readTVar (tsOnionCreds st)
-     (tlcert, _) <- readTVar (tsTLSCreds st)
-     let (_, idend) = certValidity (getCertificate idcert)
-         (_, onend) = certValidity (getCertificate oncert)
-         (_, tlend) = certValidity (getCertificate tlcert)
-     if | idend <= now -> regenerateIdentityCert rng
-        | onend <= now -> regenerateOnionCert    rng (min idend tlend)
-        | tlend <= now -> regenerateTLSCert      rng (min idend onend)
-        | otherwise    -> return ("No cert regeneration required.", rng)
+updateKeys :: CredentialState -> DateTime -> CredentialState
+updateKeys s0 now = s3
  where
-  regenerateIdentityCert g =
-    do let (idCred, onCred, tlsCred, checkAt, g') = regenerateAllKeys g now
-       writeTVar (tsCredentialState st) (NextCheckAt checkAt)
-       writeTVar (tsIdentityCreds st)   idCred
-       writeTVar (tsOnionCreds st)      onCred
-       writeTVar (tsTLSCreds st)        tlsCred
-       writeTVar (tsNextSerialNum st)   105
-       return ("Regenerated identity, onion, and TLS certificates.", g')
-  --
-  regenerateOnionCert g mint =
-    do let endtime = now `timeAdd` mempty{ durationHours = 14 * 24 }
-       (creds, g') <- freshCredentials g "haskell tor node" (now, endtime)
-       writeTVar (tsOnionCreds st) creds
-       let checkAt = (min endtime mint) `timeAdd` mempty{durationMinutes = -2}
-       writeTVar (tsCredentialState st) (NextCheckAt checkAt)
-       return ("Regenerated onion certificate.", g')
-  regenerateTLSCert g mint =
-    do let endtime = now `timeAdd` mempty{ durationHours = 2 }
-       (creds, g') <- freshCredentials g "Tor TLS cert" (now, endtime)
-       writeTVar (tsTLSCreds st) creds
-       let checkAt = (min endtime mint) `timeAdd` mempty{durationMinutes = -2}
-       writeTVar (tsCredentialState st) (NextCheckAt checkAt)
-       return ("Regenerated TLS certificate.", g')
-  --
-  freshCredentials g name valids =
-    do sNum        <- readTVar (tsNextSerialNum st)
-       (_, idpriv) <- readTVar (tsIdentityCreds st)
-       let (pub, priv, g') = generateKeyPair g 1024
-           sNum' = fromIntegral sNum
-           cert = createCertificate (PubKeyRSA pub) idpriv sNum' name valids
-       writeTVar (tsNextSerialNum st) (sNum + 1)
-       return ((cert, PrivKeyRSA priv), g')
+  (s1, forceOnion) = maybeRegenId    False      now s0
+  (s2, forceTLS)   = maybeRegenOnion forceOnion now s1
+  (s3, _)          = maybeRegenTLS   forceTLS   now s2
 
-regenerateAllKeys :: DRG g =>
-                     g -> DateTime ->
-                     ((SignedCertificate, PrivKey),
-                      (SignedCertificate, PrivKey),
-                      (SignedCertificate, PrivKey),
-                      DateTime, g)
-regenerateAllKeys g now = (idCreds, onionCreds, tlsCreds, checkAt, g''')
+getCredCert :: (SignedCertificate, PrivKey) -> Certificate
+getCredCert = signedObject . getSigned . fst
+
+maybeRegenId :: Bool -> DateTime -> CredentialState -> (CredentialState, Bool)
+maybeRegenId force now state | force || (now > expiration) = (state', True)
+                             | otherwise                   = (state,  False)
  where
-  idCreds    = (identCert, PrivKeyRSA idPriv)
-  onionCreds = (onionCert, PrivKeyRSA onionPriv)
-  tlsCreds   = (tlsCert,   PrivKeyRSA tlsPriv)
+  (_, expiration) = certValidity (getCredCert (credIdentity state))
   --
-  (idPub,    idPriv,     g')   = generateKeyPair g   1024
-  (onionPub, onionPriv,  g'')  = generateKeyPair g'  1024
-  (tlsPub,   tlsPriv,    g''') = generateKeyPair g'' 1024
-  identCert = createCertificate (PubKeyRSA idPub) (PrivKeyRSA idPriv)
-                                101 "haskell tor" (now, twoYears)
-  onionCert = createCertificate (PubKeyRSA onionPub) (PrivKeyRSA idPriv)
-                                102 "haskell tor node" (now, twoWeeks)
-  tlsCert   = createCertificate (PubKeyRSA tlsPub) (PrivKeyRSA idPriv)
-                                103 "Tor TLS cert" (now, twoHours)
-  --
+  serial = credNextSerialNum state
+  (pub, priv, g') = generateKeyPair (credRNG state) 1024
+  cert = createCertificate (PubKeyRSA pub) (PrivKeyRSA priv) serial
+                           "haskell tor" (now, twoYears)
   twoYears  = now `timeAdd` mempty{ durationHours = (2 * 365 * 24) }
-  twoWeeks  = now `timeAdd` mempty{ durationHours = (     14 * 24) }
-  twoHours  = now `timeAdd` mempty{ durationHours = (           2) }
-  checkAt   = now `timeAdd` mempty{ durationMinutes = -2 }
+  --
+  state' = state{ credRNG = g', credNextSerialNum = serial + 1
+                , credIdentity = (cert, PrivKeyRSA priv) }
+
+maybeRegenOnion :: Bool -> DateTime -> CredentialState -> (CredentialState,Bool)
+maybeRegenOnion force now state | force || (now > expiration) = (state', True)
+                                | otherwise                   = (state,  False)
+ where
+  (_, expiration) = certValidity (getCredCert (credIdentity state))
+  --
+  serial = credNextSerialNum state
+  (pub, priv, g') = generateKeyPair (credRNG state) 1024
+  (_, idpriv) = credIdentity state
+  cert = createCertificate (PubKeyRSA pub) idpriv serial
+                           "haskell tor node" (now, twoWeeks)
+  twoWeeks  = now `timeAdd` mempty{ durationHours = (14 * 24) }
+  --
+  state' = state{ credRNG = g', credNextSerialNum = serial + 1
+                , credOnion = (cert, PrivKeyRSA priv) }
+
+maybeRegenTLS :: Bool -> DateTime -> CredentialState -> (CredentialState,Bool)
+maybeRegenTLS force now state | force || (now > expiration) = (state', True)
+                                | otherwise                   = (state,  False)
+ where
+  (_, expiration) = certValidity (getCredCert (credIdentity state))
+  --
+  serial = credNextSerialNum state
+  (pub, priv, g') = generateKeyPair (credRNG state) 1024
+  (_, idpriv) = credIdentity state
+  cert = createCertificate (PubKeyRSA pub) idpriv serial
+                           "haskell tor node" (now, twoHours)
+  twoHours  = now `timeAdd` mempty{ durationHours = 2 }
+  --
+  state' = state{ credRNG = g', credNextSerialNum = serial + 1
+                , credTLS = (cert, PrivKeyRSA priv) }
 
 -- ----------------------------------------------------------------------------
 
@@ -236,10 +192,3 @@ isSignedBy cert bycert =
   toVerify HashSHA384 = verify (Just SHA384)
   toVerify HashSHA512 = verify (Just SHA512)
   toVerify _          = \ _ _ _ -> False
-
-
-sleepFor :: TimeInterval t => t -> IO ()
-sleepFor dur =
-   do putStrLn ("Should sleepFor " ++ show secs ++ " seconds.")
-      threadDelay (fromIntegral (toSeconds dur) * 1000000)
- where secs = fromIntegral (toSeconds dur)

@@ -14,15 +14,15 @@ module Tor.State(
        , getOnionCredentials
        , getSigningCredentials
        , withRNG
-       , withRNGSTM
+       , withRNGIO
        )
  where
 
-import Control.Concurrent.STM
-import Control.Monad
+import Control.Concurrent
 import Crypto.Random
 import Data.ByteString(empty)
 import Data.Hourglass.Now
+import Data.Tuple(swap)
 import Data.X509
 import Tor.DataFormat.TorAddress
 import Tor.NetworkStack
@@ -34,13 +34,13 @@ import Tor.State.Directories
 import Tor.State.Routers
 
 data TorState ls s = TorState {
-       tsRNG            :: TVar TorRNG
+       tsRNG            :: MVar TorRNG
      , tsNetwork        :: TorNetworkStack ls s
      , tsLogger         :: String -> IO ()
      , tsCredentials    :: Credentials
      , tsDirectories    :: DirectoryDB
      , tsRouters        :: RouterDB
-     , tsAddresses      :: TVar [TorAddress]
+     , tsAddresses      :: MVar [TorAddress]
      , tsBaseRouterDesc :: RouterDesc
      }
 
@@ -51,8 +51,8 @@ initializeTorState tsNetwork tsLogger flags =
      tsDirectories       <- newDirectoryDatabase tsNetwork tsLogger defaultDirectories
      tsCredentials       <- newCredentials tsLogger
      tsRouters           <- newRouterDatabase tsNetwork tsDirectories tsLogger
-     tsAddresses         <- newTVarIO []
-     tsRNG               <- newTVarIO =<< drgNew
+     tsAddresses         <- newMVar []
+     tsRNG               <- newMVar =<< drgNew
      let tsBaseRouterDesc = RouterDesc {
            routerNickname                = getNickname flags
          , routerIPv4Address             = ""
@@ -97,29 +97,25 @@ addLocalAddress :: TorState ls s -> TorAddress -> IO ()
 addLocalAddress _ (TransientError _) = return ()
 addLocalAddress _ (NontransientError _) = return ()
 addLocalAddress ts x =
-  do msg <- atomically $ do current <- readTVar (tsAddresses ts)
-                            if x `elem` current
-                               then return ""
-                               else do writeTVar (tsAddresses ts) (x : current)
-                                       return ("Added new address: " ++
-                                               unTorAddress x)
-     unless (msg == "") $
-       logMsg ts msg
+  modifyMVar_ (tsAddresses ts) $ \ addrs ->
+    if x `elem` addrs
+       then return addrs
+       else do logMsg ts ("Added new address: " ++ unTorAddress x)
+               return (x : addrs)
 
 getLocalAddresses :: TorState ls s -> IO [TorAddress]
-getLocalAddresses = atomically . readTVar . tsAddresses
+getLocalAddresses = readMVar . tsAddresses
 
 getLocalRouterDesc :: TorState ls s -> IO RouterDesc
 getLocalRouterDesc torst =
-  atomically $
-    do ipaddr <- readTVar (tsAddresses torst)
-       (sigcert, _) <- getSigningKey (tsCredentials torst)
-       (oncert,  _) <- getOnionKey   (tsCredentials torst)
-       return (tsBaseRouterDesc torst) {
-           routerIPv4Address = getIPv4Address ipaddr
-         , routerOnionKey    = getPublicKey oncert
-         , routerSigningKey  = getPublicKey sigcert
-         }
+  do ipaddr <- readMVar (tsAddresses torst)
+     (sigcert, _) <- getSigningKey (tsCredentials torst)
+     (oncert,  _) <- getOnionKey   (tsCredentials torst)
+     return (tsBaseRouterDesc torst) {
+         routerIPv4Address = getIPv4Address ipaddr
+       , routerOnionKey    = getPublicKey oncert
+       , routerSigningKey  = getPublicKey sigcert
+       }
  where
   getIPv4Address []          = error "Attempt to build desc w/o IP4 address!"
   getIPv4Address ((IP4 x):_) = x
@@ -135,29 +131,20 @@ getNetworkStack = tsNetwork
 
 getRouter :: TorState ls s -> [RouterRestriction] -> IO RouterDesc
 getRouter torst rests =
-  atomically
-    (withRNGSTM torst
-       (Tor.State.Routers.getRouter (tsRouters torst) rests))
+  modifyMVar (tsRNG torst) $ \ g ->
+    Tor.State.Routers.getRouter (tsRouters torst) rests g
 
 getSigningCredentials :: TorState ls s -> IO (SignedCertificate, PrivKey)
-getSigningCredentials s = atomically (getSigningKey (tsCredentials s))
+getSigningCredentials s = getSigningKey (tsCredentials s)
 
 getOnionCredentials :: TorState ls s -> IO (SignedCertificate, PrivKey)
-getOnionCredentials s = atomically (getOnionKey (tsCredentials s))
+getOnionCredentials s = getOnionKey (tsCredentials s)
 
 withRNG :: TorState ls s -> (TorRNG -> (a, TorRNG)) -> IO a
-withRNG s f = atomically $
-                do g <- readTVar (tsRNG s)
-                   let (res, g') = f g
-                   writeTVar (tsRNG s) g'
-                   return res
+withRNG s f = modifyMVar (tsRNG s) (return . swap . f)
 
-withRNGSTM :: TorState ls s -> (TorRNG -> STM (a, TorRNG)) -> STM a
-withRNGSTM s f =
-  do g <- readTVar (tsRNG s)
-     (res, g') <- f g
-     writeTVar (tsRNG s) g'
-     return res
+withRNGIO :: TorState ls s -> (TorRNG -> IO (a, TorRNG)) -> IO a
+withRNGIO s f = modifyMVar (tsRNG s) (\ x -> swap `fmap` f x)
 
 -- ----------------------------------------------------------------------------
 
