@@ -60,7 +60,7 @@ fetchItemFile Descriptors       = "/tor/server/all.z"
 fetchItemTime :: FetchItem -> Int
 fetchItemTime ConsensusDocument = 60 * 1000000
 fetchItemTime KeyCertificate    = 5  * 1000000
-fetchItemTime Descriptors       = 5  * 1000000
+fetchItemTime Descriptors       = 60 * 1000000
 
 fetch :: Fetchable a => 
          TorNetworkStack ls s ->
@@ -81,6 +81,7 @@ fetch ns host tcpport item =
                     case decompress body of
                       Nothing    -> return (Left "Decompression failure.")
                       Just body' -> return (parseBlob (L.toStrict body'))
+            `finally` close ns sock
  where
   timeout' tm io =
     do res <- timeout tm io
@@ -97,7 +98,7 @@ buildGet str = result
   crlf        = "\r\n"
 
 readResponse :: TorNetworkStack ls s -> s -> IO (Either String L.ByteString)
-readResponse ns sock = finally (getResponse (parse httpResponse)) (close ns sock)
+readResponse ns sock = getResponse (parse httpResponse)
  where
   getResponse parseStep =
     do chunk <- recv ns sock 4096
@@ -114,8 +115,7 @@ readResponse ns sock = finally (getResponse (parse httpResponse)) (close ns sock
   lazyRead :: IO [ByteString]
   lazyRead = unsafeInterleaveIO $ do chunk <- recv ns sock 4096
                                      if S.null chunk
-                                        then do close ns sock
-                                                return []
+                                        then return []
                                         else do rest <- lazyRead
                                                 return (chunk : rest)
 
