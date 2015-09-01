@@ -27,6 +27,8 @@ import Hypervisor.XenStore
 import Tor.NetworkStack.Hans
 import XenDevice.NIC
 #else
+import Network.Socket hiding (listen, accept)
+import System.IO
 import Tor.NetworkStack.System
 #endif
 
