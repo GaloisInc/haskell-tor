@@ -3,7 +3,7 @@
 import Control.Concurrent(forkIO,threadDelay)
 import Control.Exception
 import Control.Monad
-import Data.ByteString.Char8(pack)
+import qualified Data.ByteString.Char8 as BSC
 import Data.Hourglass
 import Data.Hourglass.Now
 import Data.List
@@ -84,7 +84,7 @@ buildCircularCircuit torState = catch tryCircular notPublic
   --
   buildGet str = result
    where
-    result      = pack (requestLine ++ userAgent ++ crlf)
+    result      = BSC.pack (requestLine ++ userAgent ++ crlf)
     requestLine = "GET " ++ str ++ " HTTP/1.0\r\n"
     userAgent   = "User-Agent: CERN-LineMode/2.15 libwww/2.17b3\r\n"
     crlf        = "\r\n"

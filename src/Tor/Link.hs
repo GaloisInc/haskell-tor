@@ -13,7 +13,6 @@ module Tor.Link(
 
 import Control.Applicative
 import Control.Concurrent
-import Control.Concurrent.STM
 import Control.Exception
 import Control.Monad
 import Crypto.Hash(SHA256)
@@ -58,33 +57,33 @@ type CircuitHandler = TorCell -> IO ()
 data TorLink = TorLink {
        linkContext           :: Context
      , linkInitiatedRemotely :: Bool
-     , linkHandlerTable      :: TVar (Map Word32 CircuitHandler)
+     , linkHandlerTable      :: MVar (Map Word32 CircuitHandler)
      }
 
 newRandomCircuit :: DRG g =>
                     TorLink -> CircuitHandler -> g ->
-                    STM (Word32, g)
+                    IO (Word32, g)
 newRandomCircuit link handler g =
   do let (bstr, g') = randomBytesGenerate 4 g
          v          = runGet getWord32host (BSL.fromStrict bstr)
          v' | linkInitiatedRemotely link = clearBit v 31
             | otherwise                  = setBit v 31
-     curTable <- readTVar (linkHandlerTable link)
-     if | v' == 0                -> newRandomCircuit link handler g'
-        | Map.member v' curTable -> newRandomCircuit link handler g'
-        | otherwise              ->
-           do let table' = Map.insert v' handler curTable
-              writeTVar (linkHandlerTable link) table'
-              return (v', g')
+     curTable <- takeMVar (linkHandlerTable link)
+     if (v' == 0) || Map.member v' curTable
+        then do putMVar (linkHandlerTable link) curTable
+                newRandomCircuit link handler g'
+        else do let table' = Map.insert v' handler curTable
+                putMVar (linkHandlerTable link) table'
+                return (v', g')
 
 modifyCircuitHandler :: TorLink -> Word32 -> CircuitHandler -> IO ()
 modifyCircuitHandler link circId handler =
-  atomically $ modifyTVar' (linkHandlerTable link) $ \ table ->
-    Map.insert circId handler table
+  modifyMVar_ (linkHandlerTable link) $ \ table ->
+    return (Map.insert circId handler table)
 
 endCircuit :: TorLink -> Word32 -> IO ()
 endCircuit link circId =
-  atomically $ modifyTVar' (linkHandlerTable link) $ Map.delete circId
+  modifyMVar_ (linkHandlerTable link) $ return . (Map.delete circId)
 
 -- -----------------------------------------------------------------------------
 
@@ -140,21 +139,21 @@ initializeClientTorLink torst them =
        logMsg torst ("Created new link to " ++ routerIPv4Address them ++
                      if null (routerNickname them) then "" else
                       (" (" ++ show (routerNickname them) ++ ")"))
-       handlerTableTV <- newTVarIO Map.empty
-       _ <- forkIO (runLink torst tls handlerTableTV [left])
-       return (Right (TorLink tls False handlerTableTV))
+       handlerTableMV <- newMVar Map.empty
+       _ <- forkIO (runLink torst tls handlerTableMV [left])
+       return (Right (TorLink tls False handlerTableMV))
 
 runLink :: TorState ls s ->
-           Context -> TVar (Map Word32 CircuitHandler) ->
+           Context -> MVar (Map Word32 CircuitHandler) ->
            [ByteString] ->
            IO ()
-runLink tor link handlerMapTV left =
+runLink tor link handlerMapMV left =
   do mcell <- fetchCell (runGetIncremental getTorCell) left
      case mcell of
        Nothing -> return ()
        Just (cell, rest) ->
          do processCell cell
-            runLink tor link handlerMapTV rest
+            runLink tor link handlerMapMV rest
  where
   fetchCell (Fail _ _ _)   _ = return Nothing
   fetchCell (Partial next) [] =
@@ -184,7 +183,7 @@ runLink tor link handlerMapTV left =
   processCell   Authorize                     = return ()
   --
   sendToHandler circId x =
-    do table <- readTVarIO handlerMapTV
+    do table <- readMVar handlerMapMV
        case Map.lookup circId table of
          Nothing ->
            logMsg tor ("Cell received for unknown circuit " ++ show circId)
@@ -339,8 +338,8 @@ acceptIncomingLink torState sock who = handle dumpException $
             unless res $
               fail "Signature verification failure in AUTHENITCATE cell."
             --
-            handlerTableTV <- newTVarIO Map.empty
-            let link = TorLink tls True handlerTableTV
+            handlerTableMV <- newMVar Map.empty
+            let link = TorLink tls True handlerTableMV
             _ <- forkIO (runInLink torState link leftOver)
             logMsg torState ("Incoming link created from " ++ show who)
             return ()
@@ -361,7 +360,7 @@ runInLink tor link leftOver = run base [leftOver]
  where
   base         = runGetIncremental getTorCell
   tls          = linkContext link
-  handlerMapTV = linkHandlerTable link
+  handlerMapMV = linkHandlerTable link
   --
   run   (Fail _ _ _)       _        = fail "Bad input on input link."
   run x@(Partial _)        []       = run' x =<< recvData tls
@@ -392,7 +391,7 @@ runInLink tor link leftOver = run base [leftOver]
        sendData tls (putCell (Destroy circId InternalError))
   --
   sendToHandler circId x =
-    do table <- readTVarIO handlerMapTV
+    do table <- readMVar handlerMapMV
        case Map.lookup circId table of
          Nothing ->
            logMsg tor ("Cell received for unknown circuit " ++ show circId)

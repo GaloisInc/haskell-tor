@@ -8,9 +8,9 @@ module Tor.State.Directories(
        )
  where
 
+import Control.Concurrent
 import Crypto.PubKey.RSA
 import Crypto.Random
-import Control.Concurrent.STM
 import Control.Monad
 import Data.ByteString(uncons)
 import Data.ByteString(ByteString)
@@ -41,7 +41,7 @@ data Directory = Directory {
      }
  deriving (Show)
 
-newtype DirectoryDB = DDB (TVar [Directory])
+newtype DirectoryDB = DDB (MVar [Directory])
 
 newDirectoryDatabase :: TorNetworkStack ls s -> (String -> IO ()) ->
                         [String] ->
@@ -80,21 +80,23 @@ newDirectoryDatabase ns logMsg defaultStrs =
      let loadedDirs = catMaybes dirs
      logMsg (show (length loadedDirs) ++ " of " ++ show (length defaultStrs) ++
              " default directories loaded.")
-     DDB `fmap` newTVarIO loadedDirs
+     DDB `fmap` newMVar loadedDirs
 
-getRandomDirectory :: DRG g => g -> DirectoryDB -> STM (Directory, g)
-getRandomDirectory g (DDB dirlsTV) =
-  do ls <- readTVar dirlsTV
+getRandomDirectory :: DRG g => g -> DirectoryDB -> IO (Directory, g)
+getRandomDirectory g ddb@(DDB dirlsMV) =
+  do ls <- readMVar dirlsMV
      let (bstr, g') = randomBytesGenerate 1 g
      case uncons bstr of
-       Nothing -> retry
+       Nothing -> 
+         do threadDelay 1000000
+            getRandomDirectory g ddb
        Just (x, _) ->
          do let idx = fromIntegral x `mod` length ls
             return (ls !! idx, g')
 
-findDirectory :: ByteString -> DirectoryDB -> STM (Maybe Directory)
-findDirectory fprint (DDB dirlsTV) =
-  find matchesFingerprint `fmap` readTVar dirlsTV
+findDirectory :: ByteString -> DirectoryDB -> IO (Maybe Directory)
+findDirectory fprint (DDB dirlsMV) =
+  find matchesFingerprint `fmap` readMVar dirlsMV
  where
   matchesFingerprint dir =
     case dirV3Ident dir of
@@ -104,33 +106,31 @@ findDirectory fprint (DDB dirlsTV) =
 addDirectory :: TorNetworkStack ls s -> (String -> IO ()) ->
                 DirectoryDB -> Authority ->
                 IO ()
-addDirectory ns logMsg (DDB dirsTV) auth =
-  do dirs <- readTVarIO dirsTV -- this may duplicate work.
+addDirectory ns logMsg (DDB dirsMV) auth =
+  do dirs <- takeMVar dirsMV
      case find matchesFingerprint dirs of
-       Just _ ->
-         return ()
+       Just _  -> putMVar dirsMV dirs
        Nothing ->
          do e <- fetch ns (authAddress auth) (authDirPort auth) KeyCertificate
             case e of
               Left _ ->
-                logMsg ("Failed to add new directory for " ++ authName auth)
+                do logMsg ("Failed to add new directory for " ++ authName auth)
+                   putMVar dirsMV dirs
               Right i ->
-                do atomically $
-                     do dirs' <- readTVar dirsTV
-                        let newdir = Directory {
-                              dirNickname = authName auth
-                            , dirIsBridge = False
-                            , dirAddress = authAddress auth
-                            , dirOnionPort = authOnionPort auth
-                            , dirDirPort = authDirPort auth
-                            , dirV3Ident = Just (dcFingerprint i)
-                            , dirFingerprint = authIdent auth
-                            , dirPublished = dcPublished i
-                            , dirExpires = dcExpires i
-                            , dirIdentityKey = dcIdentityKey i
-                            , dirSigningKey = dcSigningKey i
-                            }
-                        writeTVar dirsTV (newdir : dirs')
+                do let newdir = Directory {
+                         dirNickname = authName auth
+                       , dirIsBridge = False
+                       , dirAddress = authAddress auth
+                       , dirOnionPort = authOnionPort auth
+                       , dirDirPort = authDirPort auth
+                       , dirV3Ident = Just (dcFingerprint i)
+                       , dirFingerprint = authIdent auth
+                       , dirPublished = dcPublished i
+                       , dirExpires = dcExpires i
+                       , dirIdentityKey = dcIdentityKey i
+                       , dirSigningKey = dcSigningKey i
+                       }
+                   putMVar dirsMV (newdir : dirs)
                    logMsg ("Added new directory entry for " ++ authName auth)
  where
   matchesFingerprint dir =

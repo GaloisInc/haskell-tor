@@ -13,9 +13,7 @@ module Tor.Circuit(
        )
  where
 
-import Control.Applicative
 import Control.Concurrent.MVar
-import Control.Concurrent.STM
 import Control.Exception
 import Control.Monad
 import Crypto.Cipher.AES
@@ -58,7 +56,7 @@ data TorEntrance = TorEntrance {
     , circExtendWaiter       :: MVar (Either DestroyReason ByteString)
     , circResolveWaiters     :: MVar (Map Word16 (MVar [(TorAddress, Word32)]))
     , circConnectionWaiters  :: MVar (Map Word16 (MVar ConnectionResp))
-    , circDataBuffers        :: MVar (Map Word16 (TVar ByteString))
+    , circDataBuffers        :: MVar (Map Word16 (MVar ByteString))
     , circForwardCryptoData  :: MVar [(EncryptionState, Context SHA1)]
     , circBackwardCryptoData :: MVar [(EncryptionState, Context SHA1)]
     }
@@ -107,8 +105,8 @@ createCircuit torst firstRouter =
     do link <- failLeft <$> initializeClientTorLink torst firstRouter
        waitMV <- newEmptyMVar
        let initHand = createHandler link waitMV
-       circId <- atomically $ withRNGSTM torst (newRandomCircuit link initHand)
-       x <- withRNG torst generateLocal'
+       circId <- withRNGIO torst (newRandomCircuit link initHand)
+       x      <- withRNG   torst generateLocal'
        let PublicNumber gx = calculatePublic oakley2 x
            gxBS = i2ospOf_ 128 gx
        let nodePub = routerOnionKey firstRouter
@@ -391,8 +389,8 @@ backwardRelayHandler torst circ cell =
     do mmv <- getDeleteFromMap (circDataBuffers circ) (relayStreamId x)
        case mmv of
          Nothing -> return ()
-         Just tv -> atomically $ do orig <- readTVar tv
-                                    writeTVar tv (orig `BS.append` block)
+         Just mv -> do orig <- takeMVar mv
+                       putMVar mv (orig `BS.append` block)
   getDeleteFromMap mapMV key =
     modifyMVar mapMV $ \ mvmap ->
       return (Map.delete key mvmap, Map.lookup key mvmap)
@@ -438,25 +436,23 @@ backwardRelayHandler torst circ cell =
 
 buildConnection :: TorEntrance -> Word16 -> IO TorConnection
 buildConnection circ strmId =
-  do readTV <- newTVarIO BS.empty
+  do readMV <- newMVar BS.empty
      modifyMVar_ (circDataBuffers circ) $ \ dbmap ->
-       return (Map.insert strmId readTV dbmap)
+       return (Map.insert strmId readMV dbmap)
      return TorConnection{
-              torRead  = readBytes readTV
+              torRead  = readBytes readMV
             , torWrite = writeBytes circ strmId
             , torClose = closeConnection circ strmId
             }
 
-readBytes :: TVar ByteString -> Int -> IO ByteString
-readBytes _      0   =
-  return BS.empty
-readBytes bstrTV amt =
-  do start <- atomically $ do buffer <- readTVar bstrTV
-                              when (BS.null buffer) retry
-                              let (res, rest) = BS.splitAt amt buffer
-                              writeTVar bstrTV rest
-                              return res
-     (start `BS.append`) <$> readBytes bstrTV (amt - BS.length start)
+readBytes :: MVar ByteString -> Int -> IO ByteString
+readBytes bstrMV total = BS.concat `fmap` loop total
+ where
+  loop 0   = return []
+  loop amt = do buffer <- takeMVar bstrMV
+                let (res, rest) = BS.splitAt amt buffer
+                putMVar bstrMV rest
+                (res :) `fmap` loop (amt - BS.length res)
 
 writeBytes :: TorEntrance -> Word16 -> ByteString -> IO ()
 writeBytes circ strmId bstr

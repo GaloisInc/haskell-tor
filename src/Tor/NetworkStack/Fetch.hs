@@ -2,6 +2,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 module Tor.NetworkStack.Fetch(
          FetchItem(..)
+       , Fetchable
        , fetch
        )
  where
@@ -49,6 +50,7 @@ instance Fetchable (Map ByteString RouterDesc) where
 data FetchItem = ConsensusDocument
                | KeyCertificate
                | Descriptors
+ deriving (Show)
 
 fetchItemFile :: FetchItem -> String
 fetchItemFile ConsensusDocument = "/tor/status-vote/current/consensus.z"

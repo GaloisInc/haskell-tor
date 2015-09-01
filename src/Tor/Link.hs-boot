@@ -10,7 +10,7 @@ module Tor.Link(
        )
  where
 
-import Control.Concurrent.STM
+import Control.Concurrent
 import Crypto.Random
 import Data.Map.Strict(Map)
 import Data.Word
@@ -25,7 +25,7 @@ type CircuitHandler = TorCell -> IO ()
 data TorLink = TorLink {
        linkContext           :: Context
      , linkInitiatedRemotely :: Bool
-     , linkHandlerTable      :: TVar (Map Word32 CircuitHandler)
+     , linkHandlerTable      :: MVar (Map Word32 CircuitHandler)
      }
 
 initializeClientTorLink :: HasBackend s =>
@@ -38,7 +38,7 @@ acceptIncomingLink :: HasBackend s =>
 
 newRandomCircuit :: DRG g =>
                     TorLink -> CircuitHandler -> g ->
-                    STM (Word32, g)
+                    IO (Word32, g)
 
 modifyCircuitHandler :: TorLink -> Word32 -> CircuitHandler -> IO ()
 
