@@ -58,9 +58,9 @@ fetchItemFile KeyCertificate    = "/tor/keys/authority.z"
 fetchItemFile Descriptors       = "/tor/server/all.z"
 
 fetchItemTime :: FetchItem -> Int
-fetchItemTime ConsensusDocument = 60 * 1000000
-fetchItemTime KeyCertificate    = 5  * 1000000
-fetchItemTime Descriptors       = 60 * 1000000
+fetchItemTime ConsensusDocument =     60 * 1000000
+fetchItemTime KeyCertificate    =     5  * 1000000
+fetchItemTime Descriptors       = 3 * 60 * 1000000
 
 fetch :: Fetchable a => 
          TorNetworkStack ls s ->
