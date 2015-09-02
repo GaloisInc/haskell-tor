@@ -5,6 +5,7 @@ import qualified Data.ByteString.Lazy as L
 import Data.Word
 import Hans.Address.IP4
 import Hans.NetworkStack
+import Network.TLS
 import Tor.DataFormat.TorAddress(TorAddress)
 import qualified Tor.DataFormat.TorAddress as TorAddr
 import Tor.NetworkStack(TorNetworkStack(TorNetworkStack))

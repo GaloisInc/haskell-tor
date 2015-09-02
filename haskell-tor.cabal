@@ -14,9 +14,6 @@ cabal-version:       >=1.10
 Flag network
   Description:        Use the base network library
 
-Flag hans
-  Description:        Use the Haskell Network Stack (HaNS)
-
 library
   default-language:   Haskell2010
   ghc-options:        -Wall -threaded
@@ -35,13 +32,14 @@ library
                       containers                 >= 0.5   && < 0.7,
                       cryptonite                 >= 0.6   && < 0.8,
                       fingertree                 >= 0.1   && < 0.3,
+                      hans                       >= 2.6   && < 2.8,
                       hourglass                  >= 0.2.9 && < 0.4,
                       memory                     >= 0.7   && < 0.9,
                       monadLib                   >= 3.7   && < 3.9,
                       pretty-hex                 >= 1.0   && < 1.2,
                       pure-zlib                  >= 0.3   && < 0.5,
                       time                       >= 1.4   && < 1.6,
-                      tls                        >= 1.3.2 && < 1.5,
+                      tls                        >= 1.3.3 && < 1.5,
                       x509                       >= 1.6   && < 1.8,
                       x509-store                 >= 1.6   && < 1.8
 
@@ -66,6 +64,7 @@ library
                       Tor.Link.DH,
                       Tor.Link.CipherSuites,
                       Tor.NetworkStack.Fetch,
+                      Tor.NetworkStack.Hans,
                       Tor.NetworkStack,
                       Tor.Options,
                       Tor.RouterDesc.Render,
@@ -78,9 +77,6 @@ library
   if flag(network)
     build-depends:    network                    >= 2.5   && < 2.7
     exposed-modules:  Tor.NetworkStack.System
-  if flag(hans)
-    build-depends:    hans                       >= 2.6   && < 2.8
-    exposed-modules:  Tor.NetworkStack.Hans
 
 executable haskell-tor
   main-is:            Main.hs
@@ -93,11 +89,12 @@ executable haskell-tor
                       base64-bytestring          >= 1.0   && < 1.2,
                       bytestring                 >= 0.10  && < 0.11,
                       cryptonite                 >= 0.6   && < 0.8,
+                      hans                       >= 2.6   && < 2.8,
                       haskell-tor                >= 0.1   && < 0.3,
                       hourglass                  >= 0.2.9 && < 0.4,
                       memory                     >= 0.7   && < 0.9,
                       time                       >= 1.4   && < 1.6,
-                      tls                        >= 1.3.2 && < 1.5,
+                      tls                        >= 1.3.3 && < 1.5,
                       x509                       >= 1.6   && < 1.8
   if os(HaLVM)
     build-depends:    hans                       >= 2.6   && < 2.8,

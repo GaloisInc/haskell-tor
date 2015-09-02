@@ -5,6 +5,7 @@ module Tor.Options(
        , getNickname
        , getOnionPort
        , getContactInfo
+       , getTapDevice
        )
  where
 
@@ -21,6 +22,7 @@ data Flag = Version
           | OutputLog FilePath
           | Nickname String
           | ContactInfo String
+          | UseTapDevice String
  deriving (Eq)
 
 options :: [OptDescr Flag]
@@ -37,6 +39,8 @@ options =
                      "An (optional) nickname for this Tor node."
   , Option ['c']     ["node-contact"] (ReqArg ContactInfo "STR")
                      "An (optional) contact for this Tor node."
+  , Option ['t']     ["use-tap"] (ReqArg UseTapDevice "STR")
+                     "Use a direct connection to a tap device."
   ]
 
 showHelpAndStop :: Bool -> IO ()
@@ -76,4 +80,8 @@ getContactInfo []                      = Nothing
 getContactInfo (ContactInfo ci : _)    = Just ci
 getContactInfo (_              : rest) = getContactInfo rest
 
+getTapDevice :: [Flag] -> Maybe String
+getTapDevice []                      = Nothing
+getTapDevice (UseTapDevice t : _)    = Just t
+getTapDevice (_              : rest) = getTapDevice rest
 
