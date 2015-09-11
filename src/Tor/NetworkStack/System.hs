@@ -1,3 +1,4 @@
+{-# LANGUAGE CPP #-}
 module Tor.NetworkStack.System(systemNetworkStack) where
 
 import Data.Binary.Put
@@ -52,7 +53,9 @@ systemAccept lsock =
          let bstr = toStrict (runPut (mapM_ putWord32be [a,b,c,d]))
          in return (res, IP6 (ip6ToString bstr))
        SockAddrUnix  _          -> fail "Unix socket? BAD."
+#if MIN_VERSION_network(2,6,1)
        SockAddrCan   _          -> fail "CAN socket? BAD."
+#endif
 
 systemRead :: Socket -> Int -> IO ByteString
 systemRead _    0   = return BS.empty

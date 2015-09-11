@@ -1,5 +1,5 @@
-{-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE CPP #-}
+{-# LANGUAGE CPP              #-}
+{-# LANGUAGE RecordWildCards  #-}
 import Control.Concurrent(forkIO,threadDelay)
 import Control.Exception
 import Control.Monad
@@ -27,14 +27,19 @@ import Hypervisor.XenStore
 import Tor.NetworkStack.Hans
 import XenDevice.NIC
 #else
+import Hans.Device.Tap
+import Hans.DhcpClient
+import Hans.NetworkStack hiding (listen, accept)
 import Network.Socket hiding (listen, accept)
+import Network.TLS
 import System.IO
+import Tor.NetworkStack.Hans
 import Tor.NetworkStack.System
 #endif
 
 main :: IO ()
 main = runDefaultMain $ \ flags ->
-  do (ns, logger)  <- initializeSystem flags
+  do (MkNS ns, logger)  <- initializeSystem flags
      let onionPort =  getOnionPort flags
      torState      <- initializeTorState ns logger flags
      startTorServerPort torState onionPort
@@ -50,15 +55,15 @@ buildCircularCircuit torState = catch tryCircular notPublic
        logMsg torState "I hope this is an output-only, non-relay node."
   --
   tryCircular =
-    do logMsg torState "Getting initial router.\n"
+    do logMsg torState "Getting initial router."
        initRouter <- getRouter torState []
-       logMsg torState "Creating circuit.\n"
+       logMsg torState "Creating circuit."
        circ       <- throwLeft =<< createCircuit torState initRouter
-       logMsg torState "Getting local address.\n"
+       logMsg torState "Getting local address."
        myAddrs    <- getLocalAddresses torState
        logMsg torState ("My publicly-routable IP address(es): " ++
                         intercalate "," (map show myAddrs))
-       logMsg torState "Getting intermediate router.\n"
+       logMsg torState "Getting intermediate router."
        midRouter  <- getRouter torState [NotRouter initRouter]
        logMsg torState ("Extending router to " ++ routerIPv4Address midRouter)
        ()         <- throwLeft =<< extendCircuit torState circ midRouter
@@ -103,24 +108,19 @@ startTorServerPort torState onionPort =
 -- -----------------------------------------------------------------------------
 
 initializeSystem :: [Flag] ->
-                    IO (TorNetworkStack Socket Socket, String -> IO ())
+                    IO (SomeNetworkStack, String -> IO ())
 #ifdef HaLVM_HOST_OS
 initializeSystem _ =
   do con    <- initXenConsole
      xs     <- initXenStore
      ns     <- newNetworkStack
      macstr <- findNIC xs
-     putStrLn ("Using NIC with MAC address " ++ macstr)
      nic    <- openNIC xs macstr
-     putStrLn ("Started the NIC.")
      let mac = read macstr
      addDevice ns mac (xenSend nic) (xenReceiveLoop nic)
-     putStrLn ("Added the device.")
      deviceUp ns mac
-     putStrLn ("Started the device.")
      ipaddr <- dhcpDiscover ns mac
-     putStrLn ("Node has IP address " ++ show ipaddr)
-     return (hansNetworkStack ns, makeLogger (\ x -> writeConsole con (x ++ "\n")))
+     return (MkNS (hansNetworkStack ns), makeLogger (\ x -> writeConsole con (x ++ "\n")))
  where
   findNIC xs =
     do nics <- listNICs xs
@@ -129,8 +129,24 @@ initializeSystem _ =
          (x:_) -> return x
 #else
 initializeSystem flags =
-  do logger <- generateLogger flags
-     return (systemNetworkStack, logger)
+  case getTapDevice flags of
+    Nothing ->
+      do logger <- generateLogger flags
+         return (MkNS systemNetworkStack, logger)
+    Just tapName ->
+      do mfd <- openTapDevice tapName
+         case mfd of
+           Nothing ->
+             fail ("Couldn't open tap device " ++ tapName)
+           Just fd ->
+             do ns <- newNetworkStack
+                logger <- generateLogger flags
+                let mac = read "52:54:00:12:34:56"
+                addDevice ns mac (tapSend fd) (tapReceiveLoop fd)
+                deviceUp ns mac
+                ipaddr <- dhcpDiscover ns mac
+                logger ("Node has IP Address " ++ show ipaddr)
+                return (MkNS (hansNetworkStack ns), logger)
 
 generateLogger :: [Flag] -> IO (String -> IO ())
 generateLogger []                 = return (makeLogger (hPutStrLn stdout))
