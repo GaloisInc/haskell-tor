@@ -39,7 +39,7 @@ library
                       memory                     >= 0.7   && < 0.9,
                       monadLib                   >= 3.7   && < 3.9,
                       pretty-hex                 >= 1.0   && < 1.2,
-                      pure-zlib                  >= 0.3   && < 0.5,
+                      pure-zlib                  >= 0.4   && < 0.5,
                       time                       >= 1.4   && < 1.6,
                       tls                        >= 1.3.2 && < 1.5,
                       x509                       >= 1.6   && < 1.8,

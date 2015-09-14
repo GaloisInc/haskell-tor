@@ -44,7 +44,6 @@ main = runDefaultMain $ \ flags ->
      torState      <- initializeTorState ns logger flags
      startTorServerPort torState onionPort
      buildCircularCircuit torState
-     forever (threadDelay 100000000)
 
 buildCircularCircuit :: HasBackend s => TorState ls s -> IO ()
 buildCircularCircuit torState = catch tryCircular notPublic
