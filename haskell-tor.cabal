@@ -52,6 +52,7 @@ library
 
   exposed-modules:
                       Data.Hourglass.Now,
+                      Tor,
                       Tor.Circuit,
                       Tor.DataFormat.Consensus,
                       Tor.DataFormat.DefaultDirectory,
@@ -106,8 +107,6 @@ executable haskell-tor
   if os(HaLVM)
     build-depends:    HALVMCore                  >= 2.0   && < 2.4,
                       XenDevice                  >= 2.0   && < 2.4
-  else
-    build-depends:    network                    >= 2.5   && < 2.7
 
 test-suite test-tor
   type:               exitcode-stdio-1.0
