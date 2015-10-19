@@ -614,6 +614,7 @@ clientTLSOpts target creds ccio = ClientParams {
                                       (HashSHA256, SignatureRSA)]
     , supportedSecureRenegotiation = True
     , supportedSession             = False
+    , supportedFallbackScsv        = True
     , supportedClientInitiatedRenegotiation = True
     }
   }
@@ -651,6 +652,7 @@ serverTLSOpts creds = ServerParams {
                                       (HashSHA256, SignatureRSA)]
     , supportedSecureRenegotiation = True
     , supportedSession             = False
+    , supportedFallbackScsv        = True
     , supportedClientInitiatedRenegotiation = True
     }
   }

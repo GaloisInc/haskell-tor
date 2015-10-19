@@ -62,11 +62,13 @@ noFail = throwCryptoError
 bulkAES128 :: Bulk
 bulkAES128 =
   Bulk {
-    bulkName      = "AES128"
-  , bulkKeySize   = 16
-  , bulkIVSize    = 16
-  , bulkBlockSize = 16
-  , bulkF         = BulkBlockF aes128cbc
+    bulkName       = "AES128"
+  , bulkKeySize    = 16
+  , bulkIVSize     = 16
+  , bulkExplicitIV = 0
+  , bulkAuthTagLen = 0
+  , bulkBlockSize  = 16
+  , bulkF          = BulkBlockF aes128cbc
   }
  where
   aes128cbc BulkEncrypt key = prep key cbcEncrypt (undefined :: AES128)
@@ -75,11 +77,13 @@ bulkAES128 =
 bulkAES256 :: Bulk
 bulkAES256 =
   Bulk {
-    bulkName      = "AES256"
-  , bulkKeySize   = 32
-  , bulkIVSize    = 16
-  , bulkBlockSize = 16
-  , bulkF         = BulkBlockF aes256cbc
+    bulkName       = "AES256"
+  , bulkKeySize    = 32
+  , bulkIVSize     = 16
+  , bulkExplicitIV = 0
+  , bulkAuthTagLen = 0
+  , bulkBlockSize  = 16
+  , bulkF          = BulkBlockF aes256cbc
   }
  where
   aes256cbc BulkEncrypt key = prep key cbcEncrypt (undefined :: AES256)
@@ -88,11 +92,13 @@ bulkAES256 =
 bulk3DES :: Bulk
 bulk3DES =
   Bulk {
-    bulkName      = "3DES-EDE-CBC"
-  , bulkKeySize   = 24
-  , bulkIVSize    = 8
-  , bulkBlockSize = 8
-  , bulkF         = BulkBlockF tripledes
+    bulkName       = "3DES-EDE-CBC"
+  , bulkKeySize    = 24
+  , bulkIVSize     = 8
+  , bulkExplicitIV = 0
+  , bulkAuthTagLen = 0
+  , bulkBlockSize  = 8
+  , bulkF          = BulkBlockF tripledes
   }
  where
   tripledes BulkEncrypt key = prep key cbcEncrypt (undefined :: DES_EDE3)
@@ -101,11 +107,13 @@ bulk3DES =
 bulkRC4 :: Bulk
 bulkRC4 =
   Bulk {
-    bulkName      = "RC4-128"
-  , bulkKeySize   = 16
-  , bulkIVSize    = 0
-  , bulkBlockSize = 0
-  , bulkF         = BulkStreamF rc4
+    bulkName       = "RC4-128"
+  , bulkKeySize    = 16
+  , bulkIVSize     = 0
+  , bulkExplicitIV = 0
+  , bulkAuthTagLen = 0
+  , bulkBlockSize  = 0
+  , bulkF          = BulkStreamF rc4
   }
  where
   rc4 _ bulkKey = BulkStream (combineRC4 (initialize bulkKey))

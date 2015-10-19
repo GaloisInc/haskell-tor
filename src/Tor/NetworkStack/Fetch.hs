@@ -13,13 +13,15 @@ import Crypto.Hash.Easy
 import Crypto.PubKey.RSA.KeyHash
 import Data.Attoparsec.ByteString
 import Data.ByteString(ByteString)
-import qualified Data.ByteString as BS
+import qualified Data.ByteString as S
 import qualified Data.ByteString.Lazy as L
 import Data.ByteString.Lazy.Char8(pack)
 import Data.Either
 import Data.Map(Map)
 import qualified Data.Map as Map
 import Data.Word
+import System.IO.Unsafe
+import System.Timeout
 import Tor.DataFormat.Consensus
 import Tor.DataFormat.DirCertInfo
 import Tor.DataFormat.Helpers
@@ -48,30 +50,44 @@ instance Fetchable (Map ByteString RouterDesc) where
 data FetchItem = ConsensusDocument
                | KeyCertificate
                | Descriptors
+ deriving (Show)
 
-instance Show FetchItem where
-  show ConsensusDocument = "/tor/status-vote/current/consensus.z"
-  show KeyCertificate    = "/tor/keys/authority.z"
-  show Descriptors       = "/tor/server/all.z"
+fetchItemFile :: FetchItem -> String
+fetchItemFile ConsensusDocument = "/tor/status-vote/current/consensus.z"
+fetchItemFile KeyCertificate    = "/tor/keys/authority.z"
+fetchItemFile Descriptors       = "/tor/server/all.z"
+
+fetchItemTime :: FetchItem -> Int
+fetchItemTime ConsensusDocument =     60 * 1000000
+fetchItemTime KeyCertificate    =     5  * 1000000
+fetchItemTime Descriptors       = 3 * 60 * 1000000
 
 fetch :: Fetchable a => 
          TorNetworkStack ls s ->
          String -> Word16 -> FetchItem ->
          IO (Either String a)
 fetch ns host tcpport item =
-  handle (\ err -> return (Left (show (err :: IOException)))) $
-    do msock <- connect ns host tcpport
-       case msock of
-         Nothing -> return (Left "Connection failure.")
-         Just sock ->
-           do write ns sock (buildGet (show item))
-              resp <- readResponse ns sock
-              case resp of
-                Left err   -> return (Left err)
-                Right body ->
-                  case decompress (L.fromStrict body) of
-                    Nothing    -> return (Left "Decompression failure.")
-                    Just body' -> return (parseBlob (L.toStrict body'))
+  handle (\ err -> return (Left (show (err :: SomeException)))) $
+    timeout' (fetchItemTime item) $
+      do msock <- connect ns host tcpport
+         case msock of
+           Nothing -> return (Left "Connection failure.")
+           Just sock ->
+             do write ns sock (buildGet (fetchItemFile item))
+                resp <- readResponse ns sock
+                case resp of
+                  Left err   -> return (Left err)
+                  Right body ->
+                    case decompress body of
+                      Nothing    -> return (Left "Decompression failure.")
+                      Just body' -> return (parseBlob (L.toStrict body'))
+            `finally` close ns sock
+ where
+  timeout' tm io =
+    do res <- timeout tm io
+       case res of
+         Nothing -> return (Left "Fetch timed out.")
+         Just x  -> return x
 
 buildGet :: String -> L.ByteString
 buildGet str = result
@@ -81,27 +97,29 @@ buildGet str = result
   userAgent   = "User-Agent: CERN-LineMode/2.15 libwww/2.17b3\r\n"
   crlf        = "\r\n"
 
-readResponse :: TorNetworkStack ls s -> s -> IO (Either String ByteString)
-readResponse ns sock = finally getResponse (close ns sock)
+readResponse :: TorNetworkStack ls s -> s -> IO (Either String L.ByteString)
+readResponse ns sock = getResponse (parse httpResponse)
  where
-  getResponse =
-    do response <- recvAll ns sock
-       case parse httpResponse (L.toStrict response) of
+  getResponse parseStep =
+    do chunk <- recv ns sock 4096
+       case parseStep chunk of
+         Fail bstr _ err ->
+           do let start = show (S.take 10 bstr)
+                  msg = "Parser error: " ++ err ++ " [" ++ start ++ "]"
+              return (Left msg)
          Partial f ->
-           handleParseResult (f BS.empty)
-         x ->
-           handleParseResult x
+           getResponse f
+         Done res () ->
+           (Right . L.fromChunks . (res:)) `fmap` lazyRead
   --
-  handleParseResult (Fail bstr _ err) =
-    do let start = show (BS.take 10 bstr)
-           msg = "Parser error: " ++ err ++ " [" ++ start ++ "]"
-       return (Left msg)
-  handleParseResult (Partial _) =
-    return (Left "Partial response received from other side.")
-  handleParseResult (Done _ res) =
-    return res
+  lazyRead :: IO [ByteString]
+  lazyRead = unsafeInterleaveIO $ do chunk <- recv ns sock 4096
+                                     if S.null chunk
+                                        then return []
+                                        else do rest <- lazyRead
+                                                return (chunk : rest)
 
-httpResponse :: Parser (Either String ByteString)
+httpResponse :: Parser ()
 httpResponse =
   do _   <- string "HTTP/"
      _   <- decDigit
@@ -113,10 +131,10 @@ httpResponse =
      msg <- toString `fmap` many1 (notWord8 13)
      _   <- crlf
      if v /= (200 :: Integer)
-        then return (Left ("HTTP Error: " ++ msg))
+        then fail ("HTTP Error: " ++ msg)
         else do _   <- many1 keyval
                 _   <- crlf
-                Right `fmap` takeByteString
+                return ()
  where
   crlf = char8 '\r' >> char8 '\n'
   keyval =

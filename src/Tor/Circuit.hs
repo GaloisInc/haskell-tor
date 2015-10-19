@@ -13,6 +13,7 @@ module Tor.Circuit(
        )
  where
 
+import Control.Applicative
 import Control.Concurrent.MVar
 import Control.Exception
 import Control.Monad

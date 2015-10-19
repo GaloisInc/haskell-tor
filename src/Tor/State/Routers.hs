@@ -7,6 +7,7 @@ module Tor.State.Routers(
        )
  where
 
+import Control.Applicative
 import Control.Concurrent
 import Control.Monad
 import Crypto.Hash.Easy
@@ -187,7 +188,7 @@ updateConsensus ns ddb logMsg rdbMV = runUpdates =<< drgNew
        let routers = filter goodRouter (conRouters census)
        let table' = mapMaybe (crossReference rdtable) routers
        logMsg' ("New router processing complete. " ++ show (length table') ++
-                " of " ++ show (length rdtable) ++ " routers available.")
+                " of " ++ show (length routers) ++ " routers available.")
        oldRdb <- inBase (tryTakeMVar rdbMV)
        let rev = maybe 1 (succ . rdbRevision) oldRdb
            arr = listArray (0, fromIntegral (length table' - 1)) table'

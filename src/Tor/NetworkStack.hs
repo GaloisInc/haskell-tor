@@ -1,5 +1,7 @@
+{-# LANGUAGE ExistentialQuantification #-}
 module Tor.NetworkStack(
          TorNetworkStack(..)
+       , SomeNetworkStack(..)
        , toBackend
        , recvAll
        , recvLine
@@ -11,6 +13,8 @@ import qualified Data.ByteString.Lazy as L
 import Data.Word
 import Network.TLS
 import Tor.DataFormat.TorAddress
+
+data SomeNetworkStack = forall lsock sock . HasBackend sock => MkNS (TorNetworkStack lsock sock)
 
 data TorNetworkStack lsock sock = TorNetworkStack {
        connect :: String -> Word16       -> IO (Maybe sock)
