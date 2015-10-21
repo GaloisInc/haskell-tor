@@ -44,19 +44,19 @@ data TorState ls s = TorState {
      , tsBaseRouterDesc :: RouterDesc
      }
 
-initializeTorState :: TorNetworkStack ls s -> (String -> IO ()) -> [Flag] ->
-                      IO (TorState ls s)
-initializeTorState tsNetwork tsLogger flags =
-  do now                 <- getCurrentTime
-     tsDirectories       <- newDirectoryDatabase tsNetwork tsLogger defaultDirectories
+initializeTorState :: TorNetworkStack ls s -> TorOptions -> IO (TorState ls s)
+initializeTorState tsNetwork opts =
+  do let tsLogger           = torLog opts
+     now                 <- getCurrentTime
+     tsDirectories       <- newDirectoryDatabase tsNetwork tsLogger defaultDirs
      tsCredentials       <- newCredentials tsLogger
      tsRouters           <- newRouterDatabase tsNetwork tsDirectories tsLogger
      tsAddresses         <- newMVar []
      tsRNG               <- newMVar =<< drgNew
      let tsBaseRouterDesc = RouterDesc {
-           routerNickname                = getNickname flags
+           routerNickname                = maybe "" torNickname (torRelayOptions opts)
          , routerIPv4Address             = ""
-         , routerORPort                  = getOnionPort flags
+         , routerORPort                  = maybe 9374 torOnionPort (torRelayOptions opts)
          , routerDirPort                 = Nothing
          , routerParseLog                = []
          , routerAvgBandwidth            = 0
@@ -73,7 +73,7 @@ initializeTorState tsNetwork tsLogger flags =
          , routerExitRules               = []
          , routerIPv6Policy              = Left []
          , routerSignature               = empty
-         , routerContact                 = getContactInfo flags
+         , routerContact                 = maybe Nothing torContact (torRelayOptions opts)
          , routerFamily                  = [] -- FIXME?
          , routerReadHistory             = Nothing
          , routerWriteHistory            = Nothing
@@ -150,8 +150,8 @@ withRNGIO s f = modifyMVar (tsRNG s) (\ x -> swap `fmap` f x)
 
 -- This is pretty much a copy and paste from the Tor reference source code, and
 -- should remain that way in order to make updating it as simple as possible.
-defaultDirectories :: [String]
-defaultDirectories = [
+defaultDirs :: [String]
+defaultDirs = [
   "moria1 orport=9101 " ++
     "v3ident=D586D18309DED4CD6D57C18FDB97EFA96D330566 " ++
     "128.31.0.39:9131 9695 DFC3 5FFE B861 329B 9F1A B04C 4639 7020 CE31",

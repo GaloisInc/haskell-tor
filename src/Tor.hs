@@ -1,13 +1,12 @@
 {-# LANGUAGE ExistentialQuantification #-}
 module Tor(
          -- * Setup and initialization
-         SetupOptions(..)
-       , ExitRule(..)
-       , TorNetworkStack(..)
-       , defaultTorOptions
+         TorNetworkStack(..)
        , Tor
        , startTor
-         -- * Functions for Tor entrnce nodes
+         -- * Options
+       , module Tor.Options
+         -- * Functions for Tor entrance nodes
        , ConnectionOptions(..)
        , resolveName
        , connect
@@ -17,51 +16,51 @@ module Tor(
        )
  where
 
+import Control.Concurrent
+import Control.Monad
 import Data.ByteString(ByteString)
+import Data.Maybe
 import Data.Word
+import Network.TLS
+import Tor.Link
 import Tor.NetworkStack hiding (connect)
-import Tor.RouterDesc
+import Tor.Options
 import Tor.State
 
 type HostName = String
 
--- |How the node should be set up during initialization.
-data SetupOptions =
-    -- |This node should act as an entrance node. If you do not
-    -- specify this, functions like resolveName and connect will
-    -- not run. On the other hand, if you really don't plan to build any
-    -- connections using this node, not including Entrance capabilities will
-    -- make things start faster.
-    TorEntrance
-  | -- |This node should act as a Tor relay node.
-     TorRelay {
-      torOnionPort :: Maybe Word16 -- ^Default: 9374
-    , torNickname  :: Maybe String -- ^Nickname for this node.
-                                   -- Default: "haskell-tor"
-    , torContact   :: Maybe String -- ^Default: unknown@unknown
-    }
-  | -- |This node should act as an exit node.
-    TorExit {
-      torExitRules :: [ExitRule]
-    }
-  | -- |Combine some set of the above.
-    And SetupOptions SetupOptions
-
--- |A reasonable default set of options, which allows this node to be used as an
--- entrance and relay node.
-defaultTorOptions :: SetupOptions
-defaultTorOptions = TorEntrance `And` TorRelay Nothing Nothing Nothing
-
 -- |A handle to the current Tor system state.
-data Tor = forall ls s . Tor { unTor :: TorState ls s }
+data Tor = forall ls s . Tor {
+       torState   :: TorState ls s
+     , torOptions :: TorOptions
+     }
 
 -- |Start up the underlying Tor system, given a network stack to operate in and
 -- some setup options.
-startTor :: TorNetworkStack ls s -> SetupOptions -> IO Tor
-startTor = undefined
+startTor :: HasBackend s => TorNetworkStack ls s -> TorOptions -> IO Tor
+startTor ns opts =
+  do torst <- initializeTorState ns opts
+     when (isRelay || isExit) $
+       do lsock <- listen ns orPort
+          logm ("Waiting for Tor connections on port " ++ show orPort)
+          forkIO_ $ forever $ do (sock, addr) <- accept ns lsock
+                                 forkIO_ (acceptIncomingLink torst sock addr)
+     when (not isRelay && isExit) $
+       do logm "WARNING: Requested exit without relay support: this is weird."
+          logm "WARNING: Please check that this is really what you want."
+     return (Tor torst opts)
+ where
+  isRelay = isJust (torRelayOptions opts)
+  isExit  = isJust (torExitOptions opts)
+  orPort  = maybe 9374 torOnionPort (torRelayOptions opts)
+  flags   = undefined
+  logm    = torLog opts
 
 -- -----------------------------------------------------------------------------
 
+-- |Resolve the given host name, anonymously. This routine will create a new
+-- circuit unless torMaxCircuits has been reached, at which point it will re-use
+-- an existing circuit.
 resolveName :: Tor -> HostName -> IO Int
 resolveName = undefined
 
@@ -77,3 +76,8 @@ writeBS = undefined
 
 readBS :: TorSocket -> Int -> IO ByteString
 readBS = undefined
+
+-- -----------------------------------------------------------------------------
+
+forkIO_ :: IO () -> IO ()
+forkIO_ m = forkIO m >> return ()
