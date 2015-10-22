@@ -71,6 +71,7 @@ library
                       Tor.Options,
                       Tor.RouterDesc.Render,
                       Tor.RouterDesc,
+                      Tor.State.CircuitManager,
                       Tor.State.Credentials,
                       Tor.State.Directories,
                       Tor.State.Routers,

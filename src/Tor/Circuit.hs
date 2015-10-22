@@ -1,5 +1,6 @@
 module Tor.Circuit(
-         createCircuit
+         TorEntrance
+       , createCircuit
        , extendCircuit
        , destroyCircuit
        --
