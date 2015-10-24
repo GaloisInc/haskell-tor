@@ -4,6 +4,7 @@ module Tor.State.Routers(
        , RouterRestriction(..)
        , newRouterDatabase
        , getRouter
+       , meetsRestrictions
        )
  where
 
@@ -74,30 +75,31 @@ getRouter (RouterDB routerDB) restrictions rng =
     do let (randBS, g') = randomBytesGenerate 8 g
        randWord <- fromIntegral <$> runGetIO getWord64be randBS
        let v = entries ! (randWord `mod` idxMod)
-       case v `meetsRestrictions` restrictions of
-         Nothing -> loop entries idxMod g'
-         Just v' -> return (g', v')
+       if v `meetsRestrictions` restrictions
+         then return (g', v)
+         else loop entries idxMod g'
   --
   runGetIO getter bstr =
     case runGet getter bstr of
       Left  _ -> fail "Cannot read 64-bit Word from 64 bytes ..."
       Right x -> return x
-  --
-  meetsRestrictions rtr []       = Just rtr
-  meetsRestrictions rtr (r:rest) =
-    case r of
-      IsStable | "Stable" `elem` routerStatus rtr  -> meetsRestrictions rtr rest
-               | otherwise                         -> Nothing
-      NotRouter rdesc | isSameRouter rtr rdesc     -> Nothing
-                      | otherwise                  -> meetsRestrictions rtr rest
-      NotTorAddr taddr | isSameAddr taddr rtr      -> Nothing
-                       | otherwise                 -> meetsRestrictions rtr rest
-      ExitNode | allowsExits (routerExitRules rtr) -> meetsRestrictions rtr rest
-               | otherwise                         -> Nothing
-      ExitNodeAllowing a p
-            | allowsExit (routerExitRules rtr) a p -> meetsRestrictions rtr rest
-            | otherwise                            -> Nothing
-  --
+
+meetsRestrictions :: RouterDesc -> [RouterRestriction] -> Bool
+meetsRestrictions rtr []       = True
+meetsRestrictions rtr (r:rest) =
+  case r of
+    IsStable | "Stable" `elem` routerStatus rtr  -> meetsRestrictions rtr rest
+             | otherwise                         -> False
+    NotRouter rdesc | isSameRouter rtr rdesc     -> False
+                    | otherwise                  -> meetsRestrictions rtr rest
+    NotTorAddr taddr | isSameAddr taddr rtr      -> False
+                     | otherwise                 -> meetsRestrictions rtr rest
+    ExitNode | allowsExits (routerExitRules rtr) -> meetsRestrictions rtr rest
+             | otherwise                         -> False
+    ExitNodeAllowing a p
+          | allowsExit (routerExitRules rtr) a p -> meetsRestrictions rtr rest
+          | otherwise                            -> False
+ where 
   isSameRouter r1 r2 = routerSigningKey r1 == routerSigningKey r2
   --
   isSameAddr (IP4 x) r = x == routerIPv4Address r

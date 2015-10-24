@@ -44,26 +44,13 @@ data TorEntranceOptions = TorEntranceOptions {
        -- the exit node. To be clear, created circuits will have an entrance
        -- node, this number of nodes, and then the exit node.
        torInternalCircuitLength :: Int
-       -- |The maximum number of circuits to keep open. If you create more than
-       -- this many connections, some circuits will be re-used. This may or may
-       -- not be a problem for you.
-     , torMaxCircuits :: Int
-       -- |The maximum number of direct connections to keep open. Note that it
-       -- is perfectly possible for this number to be less than torMaxCircuits;
-       -- in that case, one or more circuits will share a first hop. On the
-       -- other hand, setting this number to more than torMaxCircuits means that
-       -- you will always be capable of using more connections than you will
-       -- actually use.
-     , torMaxConnections :: Int
      }
 
 -- |A reasonable set of entrance options. The internal circuit length is set to
--- 6, and both max circuits and connections are set to 3.
+-- 6.
 defaultTorEntranceOptions :: TorEntranceOptions
 defaultTorEntranceOptions  = TorEntranceOptions {
     torInternalCircuitLength = 6
-  , torMaxCircuits           = 3
-  , torMaxConnections        = 3
   }
 
 data TorRelayOptions = TorRelayOptions {
