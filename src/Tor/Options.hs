@@ -44,13 +44,18 @@ data TorEntranceOptions = TorEntranceOptions {
        -- the exit node. To be clear, created circuits will have an entrance
        -- node, this number of nodes, and then the exit node.
        torInternalCircuitLength :: Int
+       -- |The target number of external connections to keep alive for
+       -- outgoing connections. Note that this is a target, rather than a hard
+       -- minimum or limit.
+     , torTargetLinks :: Int
      }
 
 -- |A reasonable set of entrance options. The internal circuit length is set to
--- 6.
+-- 6, and a target number of links of 5.
 defaultTorEntranceOptions :: TorEntranceOptions
 defaultTorEntranceOptions  = TorEntranceOptions {
     torInternalCircuitLength = 6
+  , torTargetLinks           = 5
   }
 
 data TorRelayOptions = TorRelayOptions {
@@ -64,15 +69,21 @@ data TorRelayOptions = TorRelayOptions {
       -- |A contact email address. If not provided, we will either provide
       -- no email address or just include a junk address.
     , torContact   :: Maybe String
+      -- |The maximum number of links from this node. Note that this should be
+      -- greater than or equal to torTargetLinks if this node is also to be used
+      -- as an entrance node.
+    , torMaximumLinks :: Int
     }
 
 -- |A reasonable set of relay options. The onion port is set to 9374, the
--- nickname is set to "", and no contact information is provided.
+-- nickname is set to "", and no contact information is provided. These options
+-- set the maximum number of links to 50.
 defaultTorRelayOptions :: TorRelayOptions
 defaultTorRelayOptions  = TorRelayOptions {
-    torOnionPort = 9374
-  , torNickname  = ""
-  , torContact   = Nothing
+    torOnionPort    = 9374
+  , torNickname     = ""
+  , torContact      = Nothing
+  , torMaximumLinks = 50
   }
 
 data TorExitOptions = TorExitOptions {

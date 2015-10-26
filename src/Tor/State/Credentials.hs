@@ -22,7 +22,6 @@ import Data.ASN1.OID
 import Data.ByteString(ByteString)
 import Data.Hourglass
 import Data.Hourglass.Now
-import Data.Monoid
 import Data.String
 import Data.X509
 import Hexdump

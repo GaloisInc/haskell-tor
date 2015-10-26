@@ -1,17 +1,21 @@
 {-# LANGUAGE MultiWayIf #-}
 module Tor.Link(
-         TorLink
-       , initializeClientTorLink
-       , acceptIncomingLink
-       --
-       , newRandomCircuit
-       , modifyCircuitHandler
-       , endCircuit
-       , writeCell
+       -- * Routines using a link manager.
+         LinkManager
+       , initializeLinkManager
+       , getLocalAddresses
+       , getLink
+       , setIncomingLinkHandler
+       -- * Raw link data structures and routines
+       , TorLink
+       , initLink
+       , linkInitiatedRemotely
+       , linkRead
+       , linkWrite
+       , linkClose
        )
  where
 
-import Control.Applicative
 import Control.Concurrent
 import Control.Exception
 import Control.Monad
@@ -24,7 +28,6 @@ import Crypto.PubKey.RSA.PKCS15
 import Crypto.Random
 import Data.Binary.Get
 import Data.Binary.Put
-import Data.Bits
 import Data.ByteArray(convert)
 import Data.ByteString(ByteString)
 import qualified Data.ByteString as BS
@@ -33,372 +36,387 @@ import Data.ByteString.Char8(pack)
 import Data.Hourglass
 import Data.Hourglass.Now
 import Data.IORef
-import Data.Map.Strict(Map)
-import qualified Data.Map.Strict as Map
-import Data.Monoid
+import Data.Maybe
+import Data.Tuple(swap)
 import Data.Word
 import Data.X509 hiding (HashSHA1, HashSHA256)
 import Data.X509.CertificateStore
-import Network.TLS hiding (InternalError)
-import Tor.Circuit
+import Network.TLS hiding (Credentials)
+import qualified Network.TLS as TLS
 import Tor.DataFormat.TorAddress
 import Tor.DataFormat.TorCell
 import Tor.Link.CipherSuites
 import Tor.Link.DH
 import Tor.NetworkStack
+import Tor.Options
+import Tor.RNG
 import Tor.RouterDesc
-import Tor.State
-import Tor.State.Credentials(createCertificate, generateKeyPair, isSignedBy)
+import Tor.State.Credentials
+import Tor.State.Routers
 
-type CircuitHandler = TorCell -> IO ()
+data HasBackend s => LinkManager ls s = LinkManager {
+       lmNetworkStack        :: TorNetworkStack ls s
+     , lmRouterDB            :: RouterDB
+     , lmCredentials         :: Credentials
+     , lmIdealLinks          :: Int
+     , lmMaxLinks            :: Int
+     , lmLog                 :: String -> IO ()
+     , lmAddresses           :: MVar [TorAddress]
+     , lmRNG                 :: MVar TorRNG
+     , lmLinks               :: MVar [(RouterDesc, TorLink)]
+     , lmIncomingLinkHandler :: MVar (TorLink -> IO ())
+     }
+
+initializeLinkManager :: HasBackend s =>
+                         TorOptions ->
+                         TorNetworkStack ls s ->
+                         RouterDB -> Credentials ->
+                         IO (LinkManager ls s)
+initializeLinkManager o ns routerDB creds =
+  do addrsMV   <- newMVar []
+     rngMV     <- newMVar =<< drgNew
+     linksMV   <- newMVar []
+     ilHndlrMV <- newMVar (const (return ()))
+     let lm = LinkManager {
+                lmNetworkStack        = ns
+              , lmRouterDB            = routerDB
+              , lmCredentials         = creds
+              , lmIdealLinks          = idealLinks
+              , lmMaxLinks            = maxLinks
+              , lmLog                 = torLog o
+              , lmAddresses           = addrsMV
+              , lmRNG                 = rngMV
+              , lmLinks               = linksMV
+              , lmIncomingLinkHandler = ilHndlrMV
+              }
+     when (isRelay || isExit) $
+       do lsock <- listen ns orPort
+          lmLog lm ("Waiting for Tor connections on port " ++ show orPort)
+          _     <- forkIO $ forever $ do (sock, addr) <- accept ns lsock
+                                         acceptIncoming lm sock addr
+          return ()
+     return lm
+ where
+  isRelay    = isJust (torRelayOptions o)
+  isExit     = isJust (torExitOptions o)
+  orPort     = maybe 9374 torOnionPort (torRelayOptions o)
+  idealLinks = maybe 3 torTargetLinks (torEntranceOptions o)
+  maxLinks   = maybe 3 torMaximumLinks (torRelayOptions o)
+
+getLocalAddresses :: HasBackend s => LinkManager ls s -> IO [TorAddress]
+getLocalAddresses = readMVar . lmAddresses
+
+getLink :: HasBackend s => LinkManager ls s -> [RouterRestriction] -> IO TorLink
+getLink lm restricts =
+  modifyMVar (lmLinks lm) $ \ curLinks ->
+    if length curLinks >= lmIdealLinks lm
+       then getExistingLink curLinks []
+       else buildNewLink    curLinks
+ where
+  getExistingLink :: [(RouterDesc, TorLink)] -> [(RouterDesc, TorLink)] ->
+                     IO ([(RouterDesc, TorLink)], TorLink)
+  getExistingLink []                 acc = buildNewLink acc
+  getExistingLink (x@(rd,link):rest) acc
+    | rd `meetsRestrictions` restricts   = return (rest ++ acc, link)
+    | otherwise                          = getExistingLink rest (acc ++ [x])
+  --
+  buildNewLink :: [(RouterDesc, TorLink)] ->
+                  IO ([(RouterDesc, TorLink)], TorLink)
+  buildNewLink curLinks =
+    do entranceDesc <- modifyMVar (lmRNG lm)
+                         (getRouter (lmRouterDB lm) restricts)
+       link         <- initLink (lmNetworkStack lm) (lmCredentials lm)
+                         (lmRNG lm) (lmAddresses lm) (lmLog lm)
+                         entranceDesc
+       return (curLinks ++ [(entranceDesc, link)], link)
+
+setIncomingLinkHandler :: HasBackend s =>
+                          LinkManager ls s -> (TorLink -> IO ()) ->
+                          IO ()
+setIncomingLinkHandler lm h =
+  modifyMVar_ (lmIncomingLinkHandler lm) (const (return h))
 
 -- -----------------------------------------------------------------------------
 
 data TorLink = TorLink {
        linkContext           :: Context
      , linkInitiatedRemotely :: Bool
-     , linkHandlerTable      :: MVar (Map Word32 CircuitHandler)
+     , linkReaderThread      :: ThreadId
+     , linkReadBuffer        :: Chan TorCell
      }
 
-newRandomCircuit :: DRG g =>
-                    TorLink -> CircuitHandler -> g ->
-                    IO (Word32, g)
-newRandomCircuit link handler g =
-  do let (bstr, g') = randomBytesGenerate 4 g
-         v          = runGet getWord32host (BSL.fromStrict bstr)
-         v' | linkInitiatedRemotely link = clearBit v 31
-            | otherwise                  = setBit v 31
-     curTable <- takeMVar (linkHandlerTable link)
-     if (v' == 0) || Map.member v' curTable
-        then do putMVar (linkHandlerTable link) curTable
-                newRandomCircuit link handler g'
-        else do let table' = Map.insert v' handler curTable
-                putMVar (linkHandlerTable link) table'
-                return (v', g')
+-- |Read the next incoming cell from a link.
+linkRead :: TorLink -> IO TorCell
+linkRead = readChan . linkReadBuffer
 
-modifyCircuitHandler :: TorLink -> Word32 -> CircuitHandler -> IO ()
-modifyCircuitHandler link circId handler =
-  modifyMVar_ (linkHandlerTable link) $ \ table ->
-    return (Map.insert circId handler table)
+-- |Write a cell to the link.
+linkWrite :: TorLink -> TorCell -> IO ()
+linkWrite link cell = sendData (linkContext link) (putCell cell)
 
-endCircuit :: TorLink -> Word32 -> IO ()
-endCircuit link circId =
-  modifyMVar_ (linkHandlerTable link) $ return . (Map.delete circId)
+-- |Close the link
+linkClose :: TorLink -> IO ()
+linkClose link =
+  do killThread   (linkReaderThread link)
+     bye          (linkContext link)
+     contextClose (linkContext link)
 
--- -----------------------------------------------------------------------------
-
--- |Create a direct link to the Tor node at the given address and port number.
--- Either returns the link or an error generated during the attempted
--- connection. Note that this routine performs some internal certificate
--- checking, but you should verify that the certificate you expected from
--- the connection is what you expected it to be.
-initializeClientTorLink :: HasBackend s =>
-                           TorState ls s -> RouterDesc ->
-                           IO (Either String TorLink)
-initializeClientTorLink torst them =
-  handle (\ e -> return (Left (show (e :: SomeException)))) $
-    do now <- getCurrentTime
-       let ns = getNetworkStack torst
-           vlen = (now, now `timeAdd` mempty{ durationHours = 2 })
-       (idCert, idKey) <- getSigningCredentials torst
-       (authPriv, authCert) <- withRNG torst (genCertificate idKey vlen)
-       putStrLn ("Trying to connect to " ++ (routerIPv4Address them))
-       Just sock <- connect ns (routerIPv4Address them) (routerORPort them)
-       putStrLn ("Just built connection with them.")
-       let creds = Credentials [((CertificateChain [authCert,idCert]),
-                                PrivKeyRSA authPriv)]
-       serverCertsIO <- newIORef (CertificateChain [])
-       tls <- contextNew sock (clientTLSOpts "FIXME" creds serverCertsIO)
-       handshake tls
-       -- send out our initial message
-       let vers = putCell Versions
-       sendData tls vers
-       -- get their initial message
-       serverCerts <- readIORef serverCertsIO
-       (r2i, left, rLink, rCert, myAddr) <- getRespInitialMsgs tls serverCerts
-       addLocalAddress torst myAddr
-       -- build and send the CERTS message
-       let certs = putCell (Certs [RSA1024Identity idCert,
-                                   RSA1024Auth authCert])
-       sendData tls certs
-       -- build and send the AUTHENTICATE message
-       let i2r = BSL.toStrict (vers `BSL.append` certs)
-           idCert' = signedObject (getSigned idCert)
-       hdr <- authMessageHeader tls idCert' rCert r2i i2r rLink
-       rand <- withRNG torst (randomBytesGenerate 24)
-       let signedBit = hdr `BS.append` rand
-       Right sig <- signSafer noHash authPriv (sha256 signedBit)
-       let msg = signedBit `BS.append` sig
-       sendData tls $ putCell (Authenticate msg)
-       -- finally, build and send the NETINFO message
-       us <- getLocalAddresses torst
-       let ni = NetInfo (fromElapsed (timeGetElapsed now))
-                        (IP4 (routerIPv4Address them)) us
-       sendData tls (putCell ni)
-       -- ... and return the link pointer
-       logMsg torst ("Created new link to " ++ routerIPv4Address them ++
-                     if null (routerNickname them) then "" else
-                      (" (" ++ show (routerNickname them) ++ ")"))
-       handlerTableMV <- newMVar Map.empty
-       _ <- forkIO (runLink torst tls handlerTableMV [left])
-       return (Right (TorLink tls False handlerTableMV))
-
-runLink :: TorState ls s ->
-           Context -> MVar (Map Word32 CircuitHandler) ->
-           [ByteString] ->
-           IO ()
-runLink tor link handlerMapMV left =
-  do mcell <- fetchCell (runGetIncremental getTorCell) left
-     case mcell of
-       Nothing -> return ()
-       Just (cell, rest) ->
-         do processCell cell
-            runLink tor link handlerMapMV rest
- where
-  fetchCell (Fail _ _ _)   _ = return Nothing
-  fetchCell (Partial next) [] =
-    do newbuf <- recvData link
-       fetchCell (Partial next) [newbuf]
-  fetchCell (Partial next) (f:rest) =
-    fetchCell (next (Just f)) rest
-  fetchCell (Done frest _ res) buf =
-    return (Just (res, frest : buf))
-  --
-  processCell   Padding                       = return ()
-  processCell   (Create _ _)                  = putStrLn "Implement incoming create!"
-  processCell x@(Created circId _)            = sendToHandler circId x
-  processCell x@(Relay circId _)              = sendToHandler circId x
-  processCell x@(Destroy circId _)            = sendToHandler circId x
-  processCell   (CreateFast _ _)              = putStrLn "Implement CreateFast"
-  processCell x@(CreatedFast circId _ _)      = sendToHandler circId x
-  processCell   (NetInfo _ _ _)               = return ()
-  processCell x@(RelayEarly circId _)         = sendToHandler circId x
-  processCell   (Create2 _ _ _)               = putStrLn "Implement Create2"
-  processCell x@(Created2 circId _)           = sendToHandler circId x
-  processCell   Versions                      = return ()
-  processCell   (VPadding _)                  = return ()
-  processCell   (Certs _)                     = return ()
-  processCell   (AuthChallenge _ _)           = return ()
-  processCell   (Authenticate _)              = return ()
-  processCell   Authorize                     = return ()
-  --
-  sendToHandler circId x =
-    do table <- readMVar handlerMapMV
-       case Map.lookup circId table of
-         Nothing ->
-           logMsg tor ("Cell received for unknown circuit " ++ show circId)
-         Just handler ->
-           do _ <- forkIO (handler x)
-              return ()
-
--- |Write the given cell to the Tor link.
-writeCell :: TorLink -> TorCell -> IO ()
-writeCell link cell =
-  do let outputBS = putCell cell
-     sendData (linkContext link) outputBS
-
--- -----------------------------------------------------------------------------
-
-acceptIncomingLink :: HasBackend s => TorState ls s -> s -> TorAddress -> IO ()
-acceptIncomingLink torState sock who = handle dumpException $
+-- |Create a direct link to the given tor node.  note that this routine performs
+-- some internal certificate checking, but you should verify that the
+-- certificate you expected from the connection is what you expected it to be.
+-- YOU SHOULD PROBABLY NOT USE THIS ROUTINE. Instead, use getLink, above.
+initLink :: HasBackend s =>
+            TorNetworkStack ls s ->
+            Credentials ->
+            MVar TorRNG ->
+            MVar [TorAddress] ->
+            (String -> IO ()) ->
+            RouterDesc ->
+            IO TorLink
+initLink ns creds rngMV myAddrsMV llog them =
   do now <- getCurrentTime
-     let vlen = (now, now `timeAdd` mempty{ durationHours = 2 })
-     (idCert, idKey) <- getSigningCredentials torState
-     let idCert' = signedObject (getSigned idCert)
-     (linkPriv, linkCert) <- withRNG torState (genCertificate idKey vlen)
-     let creds = Credentials [(CertificateChain [linkCert, idCert],
-                               PrivKeyRSA linkPriv)]
-     tls <- contextNew sock (serverTLSOpts creds)
-     (versions, iversstr) <- getVersions tls
-     unless (4 `elem` versions) $ fail "Link doesn't support version 4."
-     -- "The responder sends a VERSIONS cell, ..."
-     let versstr = putCell Versions
-     sendData tls versstr
-     -- "... a CERTS cell (4.2 below) to give the initiator the certificates
-     -- it needs to learn the responder's identity, ..."
-     let certsbstr = putCell (Certs [RSA1024Identity idCert,
-                                     LinkKeyCert linkCert])
- 
-     sendData tls certsbstr
-     -- "... an AUTH_CHALLENGE cell (4.3) that the initiator must include as
-     -- part of its answer if it chooses to authenticate, ..."
-     chalBStr <- withRNG torState (\ g -> randomBytesGenerate 32 g)
-     let authcbstr = putCell (AuthChallenge chalBStr [1])
-     sendData tls authcbstr
-     -- "... and a NETINFO cell (4.5) "
-     others <- getLocalAddresses torState
-     epochsec <- (fromElapsed . timeGetElapsed) <$> getCurrentTime
-     sendData tls (putCell (NetInfo epochsec who others))
-     -- "At this point the initiator may send a NETINFO cell if it does not
-     -- wish to authenticate, or a CERTS cell, an AUTHENTICATE cell, and a
-     -- NETINFO cell if it does."
-     (iresp, leftOver) <- getInitiatorInfo tls
-     case iresp of
-       Left _ ->
-         fail "Initiator chose not to authenticate."
-       Right (Certs certs, Authenticate amsg, NetInfo _ _ _) ->
-         do -- "To authenticate the initiator, the responder MUST check the
-            -- following:
-            --   * The CERTS cell contains exactly one CerType 3 'AUTH'
-            --     certificate.
-            let authCert  = exactlyOneAuth certs Nothing
-                authCert' = signedObject (getSigned authCert)
-            --   * The CERTS cell contains exactly one CerType 2 'ID'
-            --     certificate
-            let iidCert  = exactlyOneId certs Nothing
-                iidCert' = signedObject (getSigned iidCert)
-            --   * Both certificates have validAfter and validUntil dates
-            --     that are not expired.
-            when (certExpired authCert' now) $ fail "Auth certificate expired."
-            when (certExpired iidCert' now)   $ fail "Id certificate expired."
-            --   * The certified key in the AUTH certificate is a 1024-bit RSA
-            --     key.
-            unless (is1024BitRSAKey authCert) $
-              fail "Auth certificate key is the wrong size."
-            --   * The certified key in the ID certificate is a 1024-bit RSA
-            --     key.
-            unless (is1024BitRSAKey iidCert) $
-              fail "Identity certificate key is the wrong size."
-            --   * The auth certificate is correctly signed with the key in the
-            --     ID certificate.
-            unless (authCert `isSignedBy` iidCert') $
-              fail "Auth certificate not signed by identity cert."
-            --   * The ID certificate is correctly self-signed."
-            unless (iidCert `isSignedBy` iidCert') $
-              fail "Identity cert incorrectly self-signed."
-            -- Checking these conditions is NOT sufficient to authenticate that
-            -- the initiator has the ID it claims; to do so, the cells in 4.3
-            -- [ACW: AUTH_CHALLENGE, send by us] and 4.4 [ACW: AUTHENTICATE,
-            -- processed next] below must be exchanged." - tor-spec, Section 4.2
-            -- If AuthType is 1 (meaning 'RSA-SHA256-TLSSecret'), then the
-            -- Authentication contains the following:
-            --   TYPE: The characters 'AUTH0001' [8 octets]
-            let (auth0001, rest1) = BS.splitAt 8 amsg
-            unless (auth0001 == (pack "AUTH0001")) $
-              fail "Bad type in AUTHENTICATE cell."
-            --   CID: A SHA256 hash of the initiator's RSA1024 identity key
-            --        [32 octets]
-            let (cid, rest2) = BS.splitAt 32 rest1
-            unless (cid == keyHash sha256 iidCert') $
-              fail "Bad initiator key hash in AUTHENTICATE cell."
-            --   SID: A SHA256 hash of the responder's RSA1024 identity key
-            --        [32 octets]
-            let (sid, rest3) = BS.splitAt 32 rest2
-            unless (sid == keyHash sha256 idCert') $
-              fail "Bad responder key hash in AUTHENTICATE cell."
-            --   SLOG: A SHA256 hash of all bytes sent from the responder to
-            --         the initiator as part of the negotiation up to and
-            --         including the AUTH_CHALLENGE cell; that is, the
-            --         VERSIONS cell, the CERTS cell, the AUTH_CHALLENGE
-            --         cell, and any padding cells. [32 octets]
-            let (slog, rest4) = BS.splitAt 32 rest3
-                r2i = BSL.concat [versstr, certsbstr, authcbstr]
-            unless (slog == sha256 (BSL.toStrict r2i)) $
-              fail "Bad hash of responder log in AUTHENTICATE cell."
-            --  CLOG: A SHA256 hash of all bytes sent from the initiator to
-            --        the responder as part of the negotiation so far; that is
-            --        the VERSIONS cell and the CERTS cell and any padding
-            --        cells. [32 octets]
-            let (clog, rest5) = BS.splitAt 32 rest4
-                i2r           = iversstr `BSL.append` putCell (Certs certs)
-            unless (clog == sha256 (BSL.toStrict i2r)) $
-              fail "Bad hash of initiator log in AUTHENTICATE cell."
-            --  SCERT: A SHA256 hash of the responder's TLS link certificate.
-            --         [32 octets]
-            let (scert, rest6) = BS.splitAt 32 rest5
-                linkCertBStr   = encodeSignedObject linkCert
-            unless (scert == sha256 linkCertBStr) $
-              fail "Bad hash of my link cert in AUTHENTICATE cell."
-            --  TLSSECRETS: A SHA256 HMAC, using the TLS master secret as the
-            --              secret key, of the following:
-            --                - client_random, as sent in the TLS Client Hello
-            --                - server_random, as sent in the TLS Server Hello
-            --                - the NUL terminated ASCII string:
-            --                 "Tor V3 handshake TLS cross-certificate"
-            --              [32 octets]
-            let (tlssecrets, rest7) = BS.splitAt 32 rest6
-            ctxt <- nothingError <$> contextGetInformation tls
-            let cRandom = unClientRandom (nothingError (infoClientRandom ctxt))
-                sRandom = unServerRandom (nothingError (infoServerRandom ctxt))
-                masterSecret = nothingError (infoMasterSecret ctxt)
-            let ccert       = pack "Tor V3 handshake TLS cross-certification\0"
-                blob        = BS.concat [cRandom, sRandom, ccert]
-                tlssecrets' = convert (hmac masterSecret blob :: HMAC SHA256)
-            unless (tlssecrets == tlssecrets') $
-              fail "TLS secret mismatch in AUTHENTICATE cell."
-            --  RAND: A 24 byte value, randomly chosen by the initiator
-            let (rand, sig) = BS.splitAt 24 rest7
-            --  SIG: A signature of a SHA256 hash of all the previous fields
-            --       using the initiator's "Authenticate" key as presented.
-            let msg = BS.concat [auth0001, cid, sid, slog, clog, scert,
-                                 tlssecrets, rand]
-                hash = sha256 msg
-                PubKeyRSA pub = certPubKey authCert'
-                res = verify noHash pub hash sig
-            unless res $
-              fail "Signature verification failure in AUTHENITCATE cell."
-            --
-            handlerTableMV <- newMVar Map.empty
-            let link = TorLink tls True handlerTableMV
-            _ <- forkIO (runInLink torState link leftOver)
-            logMsg torState ("Incoming link created from " ++ show who)
-            return ()
-       Right (_, _, _) ->
-         fail "Internal error getting initiator data."
+     let validity = (now, now `timeAdd` mempty{ durationHours = 2 })
+     (idCert, idKey) <- getSigningKey creds
+     (authPriv, authCert) <- modifyMVar rngMV
+                               (return . genCertificate idKey validity)
+     llog ("Trying to connect to " ++ (routerIPv4Address them))
+     msock <- connect ns (routerIPv4Address them) (routerORPort them)
+     case msock of
+       Nothing ->
+         throwIO (userError ("Could not create TLS connection to " ++
+                              show (routerIPv4Address them) ++ ":" ++
+                              show (routerORPort them)))
+       Just sock ->
+         do llog ("Just built connection with them.")
+            let tcreds = TLS.Credentials [((CertificateChain [authCert,idCert]),
+                                          PrivKeyRSA authPriv)]
+            serverCertsIO <- newIORef (CertificateChain [])
+            tls <- contextNew sock (clientTLSOpts "FIXME" tcreds serverCertsIO)
+            handshake tls
+            -- send out our initial message
+            let vers = putCell Versions
+            sendData tls vers
+            -- get their initial message
+            serverCerts <- readIORef serverCertsIO
+            (r2i, left, rLink, rCert, myAddr) <- getRespInitialMsgs tls serverCerts
+            myAddrs' <- modifyMVar myAddrsMV $ \ myAddrs ->
+                          let myAddrs' | myAddr `elem` myAddrs = myAddrs
+                                       | otherwise             = myAddr : myAddrs
+                          in return (myAddrs', myAddrs')
+            -- build and send the CERTS message
+            let certs = putCell (Certs [RSA1024Identity idCert,
+                                        RSA1024Auth authCert])
+            sendData tls certs
+            -- build and send the AUTHENTICATE message
+            let i2r = BSL.toStrict (vers `BSL.append` certs)
+                idCert' = signedObject (getSigned idCert)
+            hdr <- authMessageHeader tls idCert' rCert r2i i2r rLink
+            rand <- modifyMVar rngMV (return . swap . randomBytesGenerate 24)
+            let signedBit = hdr `BS.append` rand
+            Right sig <- signSafer noHash authPriv (sha256 signedBit)
+            let msg = signedBit `BS.append` sig
+            sendData tls $ putCell (Authenticate msg)
+            -- finally, build and send the NETINFO message
+            let ni = NetInfo (fromElapsed (timeGetElapsed now))
+                             (IP4 (routerIPv4Address them)) myAddrs'
+            sendData tls (putCell ni)
+            -- ... and return the link pointer
+            llog ("Created new link to " ++ routerIPv4Address them ++
+                  if null (routerNickname them) then "" else
+                     (" (" ++ show (routerNickname them) ++ ")"))
+            bufCh <- newChan
+            thr   <- forkIO (runLink llog bufCh tls [left])
+            return (TorLink tls False thr bufCh)
+
+acceptIncoming :: HasBackend s => LinkManager ls s -> s -> TorAddress -> IO ()
+acceptIncoming lm sock who =
+ do now <- getCurrentTime
+    let validity = (now, now `timeAdd` mempty{ durationHours = 2 })
+    (idCert, idKey) <- getSigningKey (lmCredentials lm)
+    let idCert' = signedObject (getSigned idCert)
+    (linkPriv, linkCert) <- modifyMVar (lmRNG lm)
+                              (return . genCertificate idKey validity)
+    let creds = TLS.Credentials [(CertificateChain [linkCert, idCert],
+                                  PrivKeyRSA linkPriv)]
+    tls <- contextNew sock (serverTLSOpts creds)
+    (versions, iversstr) <- getVersions tls
+    unless (4 `elem` versions) $ fail "Link doesn't support version 4."
+    -- "The responder sends a VERSIONS cell, ..."
+    let versstr = putCell Versions
+    sendData tls versstr
+    -- "... a CERTS cell (4.2 below) to give the initiator the certificates
+    -- it needs to learn the responder's identity, ..."
+    let certsbstr = putCell (Certs [RSA1024Identity idCert,
+                                    LinkKeyCert linkCert])
+
+    sendData tls certsbstr
+    -- "... an AUTH_CHALLENGE cell (4.3) that the initiator must include as
+    -- part of its answer if it chooses to authenticate, ..."
+    chalBStr <- modifyMVar (lmRNG lm) (return . swap . randomBytesGenerate 32)
+    let authcbstr = putCell (AuthChallenge chalBStr [1])
+    sendData tls authcbstr
+    -- "... and a NETINFO cell (4.5) "
+    others <- getLocalAddresses lm
+    epochsec <- (fromElapsed . timeGetElapsed) <$> getCurrentTime
+    sendData tls (putCell (NetInfo epochsec who others))
+    -- "At this point the initiator may send a NETINFO cell if it does not
+    -- wish to authenticate, or a CERTS cell, an AUTHENTICATE cell, and a
+    -- NETINFO cell if it does."
+    (iresp, leftOver) <- getInitiatorInfo tls
+    case iresp of
+      Left _ ->
+        fail "Initiator chose not to authenticate."
+      Right (Certs certs, Authenticate amsg, NetInfo _ _ _) ->
+        do -- "To authenticate the initiator, the responder MUST check the
+           -- following:
+           --   * The CERTS cell contains exactly one CerType 3 'AUTH'
+           --     certificate.
+           let authCert  = exactlyOneAuth certs Nothing
+               authCert' = signedObject (getSigned authCert)
+           --   * The CERTS cell contains exactly one CerType 2 'ID'
+           --     certificate
+           let iidCert  = exactlyOneId certs Nothing
+               iidCert' = signedObject (getSigned iidCert)
+           --   * Both certificates have validAfter and validUntil dates
+           --     that are not expired.
+           when (certExpired authCert' now) $ fail "Auth certificate expired."
+           when (certExpired iidCert' now)   $ fail "Id certificate expired."
+           --   * The certified key in the AUTH certificate is a 1024-bit RSA
+           --     key.
+           unless (is1024BitRSAKey authCert) $
+             fail "Auth certificate key is the wrong size."
+           --   * The certified key in the ID certificate is a 1024-bit RSA
+           --     key.
+           unless (is1024BitRSAKey iidCert) $
+             fail "Identity certificate key is the wrong size."
+           --   * The auth certificate is correctly signed with the key in the
+           --     ID certificate.
+           unless (authCert `isSignedBy` iidCert') $
+             fail "Auth certificate not signed by identity cert."
+           --   * The ID certificate is correctly self-signed."
+           unless (iidCert `isSignedBy` iidCert') $
+             fail "Identity cert incorrectly self-signed."
+           -- Checking these conditions is NOT sufficient to authenticate that
+           -- the initiator has the ID it claims; to do so, the cells in 4.3
+           -- [ACW: AUTH_CHALLENGE, send by us] and 4.4 [ACW: AUTHENTICATE,
+           -- processed next] below must be exchanged." - tor-spec, Section 4.2
+           -- If AuthType is 1 (meaning 'RSA-SHA256-TLSSecret'), then the
+           -- Authentication contains the following:
+           --   TYPE: The characters 'AUTH0001' [8 octets]
+           let (auth0001, rest1) = BS.splitAt 8 amsg
+           unless (auth0001 == (pack "AUTH0001")) $
+             fail "Bad type in AUTHENTICATE cell."
+           --   CID: A SHA256 hash of the initiator's RSA1024 identity key
+           --        [32 octets]
+           let (cid, rest2) = BS.splitAt 32 rest1
+           unless (cid == keyHash sha256 iidCert') $
+             fail "Bad initiator key hash in AUTHENTICATE cell."
+           --   SID: A SHA256 hash of the responder's RSA1024 identity key
+           --        [32 octets]
+           let (sid, rest3) = BS.splitAt 32 rest2
+           unless (sid == keyHash sha256 idCert') $
+             fail "Bad responder key hash in AUTHENTICATE cell."
+           --   SLOG: A SHA256 hash of all bytes sent from the responder to
+           --         the initiator as part of the negotiation up to and
+           --         including the AUTH_CHALLENGE cell; that is, the
+           --         VERSIONS cell, the CERTS cell, the AUTH_CHALLENGE
+           --         cell, and any padding cells. [32 octets]
+           let (slog, rest4) = BS.splitAt 32 rest3
+               r2i = BSL.concat [versstr, certsbstr, authcbstr]
+           unless (slog == sha256 (BSL.toStrict r2i)) $
+             fail "Bad hash of responder log in AUTHENTICATE cell."
+           --  CLOG: A SHA256 hash of all bytes sent from the initiator to
+           --        the responder as part of the negotiation so far; that is
+           --        the VERSIONS cell and the CERTS cell and any padding
+           --        cells. [32 octets]
+           let (clog, rest5) = BS.splitAt 32 rest4
+               i2r           = iversstr `BSL.append` putCell (Certs certs)
+           unless (clog == sha256 (BSL.toStrict i2r)) $
+             fail "Bad hash of initiator log in AUTHENTICATE cell."
+           --  SCERT: A SHA256 hash of the responder's TLS link certificate.
+           --         [32 octets]
+           let (scert, rest6) = BS.splitAt 32 rest5
+               linkCertBStr   = encodeSignedObject linkCert
+           unless (scert == sha256 linkCertBStr) $
+             fail "Bad hash of my link cert in AUTHENTICATE cell."
+           --  TLSSECRETS: A SHA256 HMAC, using the TLS master secret as the
+           --              secret key, of the following:
+           --                - client_random, as sent in the TLS Client Hello
+           --                - server_random, as sent in the TLS Server Hello
+           --                - the NUL terminated ASCII string:
+           --                 "Tor V3 handshake TLS cross-certificate"
+           --              [32 octets]
+           let (tlssecrets, rest7) = BS.splitAt 32 rest6
+           ctxt <- nothingError <$> contextGetInformation tls
+           let cRandom = unClientRandom (nothingError (infoClientRandom ctxt))
+               sRandom = unServerRandom (nothingError (infoServerRandom ctxt))
+               masterSecret = nothingError (infoMasterSecret ctxt)
+           let ccert       = pack "Tor V3 handshake TLS cross-certification\0"
+               blob        = BS.concat [cRandom, sRandom, ccert]
+               tlssecrets' = convert (hmac masterSecret blob :: HMAC SHA256)
+           unless (tlssecrets == tlssecrets') $
+             fail "TLS secret mismatch in AUTHENTICATE cell."
+           --  RAND: A 24 byte value, randomly chosen by the initiator
+           let (rand, sig) = BS.splitAt 24 rest7
+           --  SIG: A signature of a SHA256 hash of all the previous fields
+           --       using the initiator's "Authenticate" key as presented.
+           let msg = BS.concat [auth0001, cid, sid, slog, clog, scert,
+                                tlssecrets, rand]
+               hash = sha256 msg
+               PubKeyRSA pub = certPubKey authCert'
+               res = verify noHash pub hash sig
+           unless res $
+             fail "Signature verification failure in AUTHENITCATE cell."
+           --
+           bufCh <- newChan
+           thr   <- forkIO (runLink (lmLog lm) bufCh tls [leftOver])
+           let link = TorLink tls True thr bufCh
+           linkHandler <- readMVar (lmIncomingLinkHandler lm)
+           linkHandler link
+           lmLog lm ("Incoming link created from " ++ show who)
+           return ()
+      Right (_, _, _) ->
+        fail "Internal error getting initiator data."
  where
   nothingError :: Maybe a -> a
   nothingError Nothing  = error "Couldn't fetch TLS secrets."
   nothingError (Just x) = x
-  dumpException :: SomeException -> IO ()
-  dumpException e =
-    do close (getNetworkStack torState) sock
-       logMsg torState ("Caught exception building incoming link from " ++
-                         show who ++ ": " ++ show e)
 
-runInLink :: TorState ls s -> TorLink -> ByteString -> IO ()
-runInLink tor link leftOver = run base [leftOver]
+runLink :: (String -> IO ()) -> Chan TorCell ->
+           Context -> [ByteString] ->
+           IO ()
+runLink llog rChan context initialBS =
+  catch (run initialState initialBS) logException
  where
-  base         = runGetIncremental getTorCell
-  tls          = linkContext link
-  handlerMapMV = linkHandlerTable link
+  logException :: SomeException -> IO ()
+  logException e
+    | Just ThreadKilled <- fromException e = return ()
+    | otherwise = llog ("Exception raised running link: " ++ show e)
   --
-  run   (Fail _ _ _)       _        = fail "Bad input on input link."
-  run x@(Partial _)        []       = run' x =<< recvData tls
-  run   (Partial next)     (f:rest) = run (next (Just f)) rest
-  run   (Done frest _ res) rest     = process res >> run base (frest:rest)
-  run' a b = run a [b]
+  initialState = runGetIncremental getTorCell
   --
-  process   Padding                       = return ()
-  process   (Create circId cdata)         = buildRelay tor link circId cdata
-  process x@(Created circId _)            = sendToHandler circId x
-  process x@(Relay circId _)              = sendToHandler circId x
-  process x@(Destroy circId _)            = sendToHandler circId x
-  process   (CreateFast circId x)         = buildRelayFast tor link circId x
-  process x@(CreatedFast circId _ _)      = sendToHandler circId x
-  process   (NetInfo _ _ _)               = return ()
-  process x@(RelayEarly circId _)         = sendToHandler circId x
-  process   (Create2 circId _ _)          = buildRelay2 circId
-  process x@(Created2 circId _)           = sendToHandler circId x
-  process   Versions                      = return ()
-  process   (VPadding _)                  = return ()
-  process   (Certs _)                     = return ()
-  process   (AuthChallenge _ _)           = return ()
-  process   (Authenticate _)              = return ()
-  process   Authorize                     = return ()
-  --
-  buildRelay2 circId =
-    do logMsg tor "Ignoring CREATE2 attempt."
-       sendData tls (putCell (Destroy circId InternalError))
-  --
-  sendToHandler circId x =
-    do table <- readMVar handlerMapMV
-       case Map.lookup circId table of
-         Nothing ->
-           logMsg tor ("Cell received for unknown circuit " ++ show circId)
-         Just handler ->
-           do _ <- forkIO (handler x)
-              return ()
+  run   (Fail    _    _ e)    _        = llog ("Error reading link: " ++ e)
+  run x@(Partial _)           []       = recvData context >>= (\ b -> run x [b])
+  run   (Partial next)        (f:rest) = run (next (Just f)) rest
+  run   (Done    r1   _ x)    r2       = do writeChan rChan x
+                                            run initialState (r1:r2)
 
+-- -- -----------------------------------------------------------------------------
+-- 
+-- newRandomCircuit :: DRG g =>
+--                     TorLink -> CircuitHandler -> g ->
+--                     IO (Word32, g)
+-- newRandomCircuit link handler g =
+--   do let (bstr, g') = randomBytesGenerate 4 g
+--          v          = runGet getWord32host (BSL.fromStrict bstr)
+--          v' | linkInitiatedRemotely link = clearBit v 31
+--             | otherwise                  = setBit v 31
+--      curTable <- takeMVar (linkHandlerTable link)
+--      if (v' == 0) || Map.member v' curTable
+--         then do putMVar (linkHandlerTable link) curTable
+--                 newRandomCircuit link handler g'
+--         else do let table' = Map.insert v' handler curTable
+--                 putMVar (linkHandlerTable link) table'
+--                 return (v', g')
 
 getVersions :: Context -> IO ([Word16], BSL.ByteString)
 getVersions tls =
@@ -439,7 +457,7 @@ getInitiatorInfo tls = getCells base
            fail "Weird cell in initiator response."
 
 
--- -----------------------------------------------------------------------------
+-- -- -----------------------------------------------------------------------------
 
 getRespInitialMsgs :: Context -> CertificateChain ->
                       IO (ByteString, ByteString,
@@ -507,7 +525,7 @@ getRespInitialMsgs tls (CertificateChain tlsCerts) =
         do b <- recvData tls
            let getter' = next (Just b)
            getNetInfoCellBit getter'
- --
+
 getResponderStart :: Get (TorCell, TorCell)
 getResponderStart =
   do _  <- getWord16be
@@ -577,13 +595,15 @@ putCell = runPut . putTorCell
 
 genCertificate :: DRG g =>
                   PrivKey -> (DateTime, DateTime) -> g ->
-                  ((PrivateKey, SignedCertificate), g)
-genCertificate signer valids g = ((priv, cert), g')
+                  (g, (PrivateKey, SignedCertificate))
+genCertificate signer valids g = (g', (priv, cert))
  where
   (pub, priv, g') = generateKeyPair g 1024
   cert            = createCertificate (PubKeyRSA pub) signer 998 "auth" valids
 
-clientTLSOpts :: String -> Credentials -> IORef CertificateChain -> ClientParams
+clientTLSOpts :: String -> TLS.Credentials ->
+                 IORef CertificateChain ->
+                 ClientParams
 clientTLSOpts target creds ccio = ClientParams {
     clientUseMaxFragmentLength     = Nothing
   , clientServerIdentification     = (target, mempty)
@@ -619,10 +639,10 @@ clientTLSOpts target creds ccio = ClientParams {
     }
   }
  where
-  getRealCreds (Credentials [])    = Nothing
-  getRealCreds (Credentials (a:_)) = Just a
+  getRealCreds (TLS.Credentials [])    = Nothing
+  getRealCreds (TLS.Credentials (a:_)) = Just a
 
-serverTLSOpts :: Credentials -> ServerParams
+serverTLSOpts :: TLS.Credentials -> ServerParams
 serverTLSOpts creds = ServerParams {
     serverWantClientCert           = False
   , serverCACertificates           = signedCerts
@@ -657,7 +677,7 @@ serverTLSOpts creds = ServerParams {
     }
   }
  where
-  Credentials innerCreds = creds
+  TLS.Credentials innerCreds = creds
   certChains             = map fst innerCreds
   signedCerts            = concatMap (\ (CertificateChain x) -> x) certChains
 

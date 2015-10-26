@@ -34,6 +34,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import Data.Map.Strict(Map)
 import qualified Data.Map.Strict as Map
+import Data.Tuple
 import Data.Word
 import Data.X509
 import Network.TLS(HasBackend)
@@ -41,11 +42,10 @@ import Tor.DataFormat.RelayCell
 import Tor.DataFormat.TorAddress
 import Tor.DataFormat.TorCell
 import Tor.HybridCrypto
-import {-# SOURCE #-} Tor.Link
+import Tor.Link
 import Tor.Link.DH
 import Tor.RNG
 import Tor.RouterDesc
-import Tor.State
 
 -- -----------------------------------------------------------------------------
 
@@ -99,46 +99,39 @@ circSendUpstream _ _ =
 
 -- -----------------------------------------------------------------------------
 
-createCircuit :: HasBackend s =>
-                 TorState ls s -> RouterDesc ->
-                 IO (Either String TorEntrance)
-createCircuit torst firstRouter =
-  handle (\ e -> return (Left (show (e :: SomeException)))) $
-    do link <- failLeft <$> initializeClientTorLink torst firstRouter
-       waitMV <- newEmptyMVar
-       let initHand = createHandler link waitMV
-       circId <- withRNGIO torst (newRandomCircuit link initHand)
-       x      <- withRNG   torst generateLocal'
-       let PublicNumber gx = calculatePublic oakley2 x
-           gxBS = i2ospOf_ 128 gx
-       let nodePub = routerOnionKey firstRouter
-       egx <- hybridEncrypt True nodePub gxBS
-       writeCell link (Create circId egx)
-       initres <- takeMVar waitMV
-       case completeTAPHandshake x initres of
-         Left err -> return (Left err)
-         Right (fencstate, bencstate) ->
-           do fencMV <- newMVar [fencstate]
-              bencMV <- newMVar [bencstate]
-              strmMV <- newMVar 1
-              ewMV   <- newEmptyMVar
-              rsvMV  <- newMVar Map.empty
-              conMV  <- newMVar Map.empty
-              dbfMV  <- newMVar Map.empty
-              let circ = TorEntrance {
-                           circForwardLink        = link
-                         , circCircuitId          = circId
-                         , circNextStreamId       = strmMV
-                         , circExtendWaiter       = ewMV
-                         , circResolveWaiters     = rsvMV
-                         , circConnectionWaiters  = conMV
-                         , circDataBuffers        = dbfMV
-                         , circForwardCryptoData  = fencMV
-                         , circBackwardCryptoData = bencMV
-                         }
-                  handler' = backwardRelayHandler torst circ
-              modifyCircuitHandler link circId handler'
-              return (Right circ)
+createCircuit :: MVar TorRNG -> TorLink -> Word32 -> IO TorEntrance
+createCircuit rngMV link circId =
+  do x <- modifyMVar rngMV generateLocal'
+     let PublicNumber gx = calculatePublic oakley2 x
+         gxBS = i2ospOf_ 128 gx
+     let nodePub = routerOnionKey firstRouter
+     egx <- hybridEncrypt True nodePub gxBS
+     writeCell link (Create circId egx)
+     initres <- takeMVar waitMV
+     case completeTAPHandshake x initres of
+       Left err -> return (Left err)
+       Right (fencstate, bencstate) ->
+         do fencMV <- newMVar [fencstate]
+            bencMV <- newMVar [bencstate]
+            strmMV <- newMVar 1
+            ewMV   <- newEmptyMVar
+            rsvMV  <- newMVar Map.empty
+            conMV  <- newMVar Map.empty
+            dbfMV  <- newMVar Map.empty
+            let circ = TorEntrance {
+                         circForwardLink        = link
+                       , circCircuitId          = circId
+                       , circNextStreamId       = strmMV
+                       , circExtendWaiter       = ewMV
+                       , circResolveWaiters     = rsvMV
+                       , circConnectionWaiters  = conMV
+                       , circDataBuffers        = dbfMV
+                       , circForwardCryptoData  = fencMV
+                       , circBackwardCryptoData = bencMV
+                       }
+                handler' = backwardRelayHandler torst circ
+            modifyCircuitHandler link circId handler'
+            return (Right circ)
  where
   failLeft (Left str) = error str
   failLeft (Right x)  = x
@@ -495,8 +488,8 @@ xorBS a b = BS.pack (BS.zipWith xor a b)
 
 -- -----------------------------------------------------------------------------
 
-generateLocal' :: TorRNG -> (PrivateNumber, TorRNG)
-generateLocal' g = withDRG g (generatePrivate oakley2)
+generateLocal' :: TorRNG -> (TorRNG, PrivateNumber)
+generateLocal' g = swap (withDRG g (generatePrivate oakley2))
 
 completeTAPHandshake :: PrivateNumber ->
                         Either DestroyReason ByteString ->

@@ -25,36 +25,32 @@ import Network.TLS
 import Tor.Link
 import Tor.NetworkStack hiding (connect)
 import Tor.Options
-import Tor.State
+import Tor.State.CircuitManager
+import Tor.State.Credentials
+import Tor.State.Directories
+import Tor.State.Routers
 
 type HostName = String
 
 -- |A handle to the current Tor system state.
 data Tor = forall ls s . Tor {
-       torState   :: TorState ls s
-     , torOptions :: TorOptions
+       torOptions        :: TorOptions
+     , torCircuitManager :: CircuitManager
      }
 
 -- |Start up the underlying Tor system, given a network stack to operate in and
 -- some setup options.
 startTor :: HasBackend s => TorNetworkStack ls s -> TorOptions -> IO Tor
 startTor ns opts =
-  do torst <- initializeTorState ns opts
-     when (isRelay || isExit) $
-       do lsock <- listen ns orPort
-          logm ("Waiting for Tor connections on port " ++ show orPort)
-          forkIO_ $ forever $ do (sock, addr) <- accept ns lsock
-                                 forkIO_ (acceptIncomingLink torst sock addr)
+  do creds    <- newCredentials
+     dirDB    <- newDirectoryDatabase ns (torLog opts)
+     routerDB <- newRouterDatabase dirDB (torLog opts)
+     lm       <- initializeLinkManager opts ns routerDB creds
+     cm       <- startCircuitManager opts routerDB lm
      when (not isRelay && isExit) $
        do logm "WARNING: Requested exit without relay support: this is weird."
           logm "WARNING: Please check that this is really what you want."
-     return (Tor torst opts)
- where
-  isRelay = isJust (torRelayOptions opts)
-  isExit  = isJust (torExitOptions opts)
-  orPort  = maybe 9374 torOnionPort (torRelayOptions opts)
-  flags   = undefined
-  logm    = torLog opts
+     return (Tor opts cm)
 
 -- -----------------------------------------------------------------------------
 

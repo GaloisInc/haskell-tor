@@ -47,6 +47,9 @@ data RouterDesc = RouterDesc {
      }
  deriving (Show)
 
+instance Eq RouterDesc where
+  a == b = routerSigningKey a == routerSigningKey b
+
 blankRouterDesc :: RouterDesc
 blankRouterDesc =
   RouterDesc {

@@ -19,7 +19,7 @@ Flag hans
 
 library
   default-language:   Haskell2010
-  ghc-options:        -Wall -threaded
+  ghc-options:        -Wall -Werror -threaded
   hs-source-dirs:     src
 
   build-depends:
@@ -75,8 +75,7 @@ library
                       Tor.State.CircuitManager,
                       Tor.State.Credentials,
                       Tor.State.Directories,
-                      Tor.State.Routers,
-                      Tor.State
+                      Tor.State.Routers
 
   if flag(network)
     build-depends:    network                    >= 2.5   && < 2.7

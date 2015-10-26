@@ -8,7 +8,6 @@ module Tor.State.Routers(
        )
  where
 
-import Control.Applicative
 import Control.Concurrent
 import Control.Monad
 import Crypto.Hash.Easy
@@ -85,12 +84,12 @@ getRouter (RouterDB routerDB) restrictions rng =
       Right x -> return x
 
 meetsRestrictions :: RouterDesc -> [RouterRestriction] -> Bool
-meetsRestrictions rtr []       = True
+meetsRestrictions _   []       = True
 meetsRestrictions rtr (r:rest) =
   case r of
     IsStable | "Stable" `elem` routerStatus rtr  -> meetsRestrictions rtr rest
              | otherwise                         -> False
-    NotRouter rdesc | isSameRouter rtr rdesc     -> False
+    NotRouter rdesc | rtr == rdesc               -> False
                     | otherwise                  -> meetsRestrictions rtr rest
     NotTorAddr taddr | isSameAddr taddr rtr      -> False
                      | otherwise                 -> meetsRestrictions rtr rest
@@ -100,22 +99,20 @@ meetsRestrictions rtr (r:rest) =
           | allowsExit (routerExitRules rtr) a p -> meetsRestrictions rtr rest
           | otherwise                            -> False
  where 
-  isSameRouter r1 r2 = routerSigningKey r1 == routerSigningKey r2
-  --
-  isSameAddr (IP4 x) r = x == routerIPv4Address r
-  isSameAddr (IP6 x) r = x `elem` map fst (routerAlternateORAddresses r)
+  isSameAddr (IP4 x) s = x == routerIPv4Address s
+  isSameAddr (IP6 x) s = x `elem` map fst (routerAlternateORAddresses s)
   isSameAddr _       _ = False
   --
   allowsExits (ExitRuleReject AddrSpecAll PortSpecAll : _) = False
   allowsExits _ = True
   --
   allowsExit [] _ _ = True -- "if no rule matches, the address wil be accepted"
-  allowsExit (ExitRuleAccept addrrule portrule : rest) addr port
+  allowsExit (ExitRuleAccept addrrule portrule : rrest) addr port
     | addrMatches addr addrrule && portMatches port portrule = True
-    | otherwise = allowsExit rest addr port
-  allowsExit (ExitRuleReject addrrule portrule : rest) addr port
+    | otherwise = allowsExit rrest addr port
+  allowsExit (ExitRuleReject addrrule portrule : rrest) addr port
     | addrMatches addr addrrule && portMatches port portrule = False
-    | otherwise = allowsExit rest addr port
+    | otherwise = allowsExit rrest addr port
   --
   portMatches _ PortSpecAll           = True
   portMatches p (PortSpecRange p1 p2) = (p >= p1) && (p <= p2)

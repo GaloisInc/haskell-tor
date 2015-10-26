@@ -9,11 +9,12 @@ import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Exception
 import Control.Monad
+import Crypto.Random
 import Data.Word
 import System.Mem.Weak
-import Tor.Circuit
 import Tor.DataFormat.TorAddress
 import Tor.DataFormat.TorCell
+import Tor.Link
 import Tor.Options
 import Tor.RNG
 import Tor.RouterDesc
@@ -25,21 +26,32 @@ data CircuitManager = NoCircuitManager
                       , cmRouterDB      :: RouterDB
                       , cmRNG           :: MVar TorRNG
                       , cmOpenCircuits  :: MVar [CircuitEntry]
+                      , cmOpenLinks     :: MVar [TorLink]
                       }
 
-data CircuitEntry = Pending RouterDesc (Async TorEntrance)
-                  | Entry   RouterDesc (Weak TorEntrance)
+data CircuitEntry = Pending {
+                      ceExitNode        :: RouterDesc
+                    , cePendingEntrance :: Async TorEntrance
+                    }
+                  | Entry {
+                      ceExitNode        :: RouterDesc
+                    , ceWeakEntrance    :: Weak TorEntrance
+                    }
 
 
-startCircuitManager :: TorOptions -> IO CircuitManager
-startCircuitManager opts =
+startCircuitManager :: TorOptions -> RouterDB -> LinkManager -> IO CircuitManager
+startCircuitManager opts rdb lm =
   case torEntranceOptions opts of
     Nothing      -> return NoCircuitManager
     Just entOpts ->
       do let circLen = torInternalCircuitLength entOpts
+         rngMV  <- newMVar =<< drgNew
          circMV <- newMVar []
-         return (CircuitManager circLen circMV)
-
+         linkMV <- newMVar []
+         setIncomingLinkHandler lm $ \ link ->
+           do modifyMVar_ linkMV (return . (link:))
+              runIncomingCircuit link
+         return (CircuitManager circLen rdb rngMV circMV linkMV)
 
 -- |Open a circuit to an exit node that allows connections to the given
 -- host and port.
@@ -50,8 +62,8 @@ openCircuit cm dest port =
     case findApplicable circs of
       Nothing ->
         do exitNode <- modifyMVar (cmRNG cm) $ \ rng ->
-                         getRouter (cmRouterDB cm) restricts (cmRNG cm)
-           pendRes <- async (buildNewCircuit exitNode (cmCircuitLength cm))
+                         getRouter (cmRouterDB cm) restricts rng
+           pendRes <- async (buildNewCircuit cm exitNode (cmCircuitLength cm))
            return (snoc circs (Pending exitNode pendRes),
                    waitAndUpdate exitNode pendRes)
       Just (pend@(Pending _ entrance), rest) ->
@@ -61,57 +73,50 @@ openCircuit cm dest port =
            case ment of
              Nothing ->
                return (rest, openCircuit cm dest port)
-             Just ent ->
-               return (snoc rest ent, return ent)
+             Just res ->
+               return (snoc rest ent, return res)
  where
   restricts = [ExitNodeAllowing (IP4 dest) port]
   --
   findApplicable ls = loop ls []
    where
     loop [] _ = Nothing
-    loop (x@(Pending en _) : rest) acc
-      | en `meetsRestrictions` restricts = Just (x, rest ++ acc)
-      | otherwise                        = findApplicable rest (snoc acc x)
-    loop (x@(Entry en _) : rest) acc
-      | en `meetsRestrictions` restricts = Just (x, rest ++ acc)
-      | otherwise                        = findApplicable rest (snoc acc x)
+    loop (x : rest) acc
+      | ceExitNode x `meetsRestrictions` restricts = Just (x, rest ++ acc)
+      | otherwise                                  = loop rest (snoc acc x)
   --
+  waitAndUpdate :: RouterDesc -> Async TorEntrance -> IO TorEntrance
   waitAndUpdate exitNode pendRes =
     do eres <- waitCatch pendRes
        case eres of
          Left err ->
-           do modifyMVar_ (cmOpenCircuits cm) (removeEntry exitNode)
+           do modifyMVar_ (cmOpenCircuits cm)
+                (return . removeEntry exitNode)
               throwIO err
          Right res ->
-           do res <- mkWeakPtr res (Just (destroyCircuit res RequestedDestroy))
-              let newent = Entry exitNode res
-              modifyMVar_ (cmOpenCircuits cm) (replaceEntry exitNode newent)
+           do weak <- mkWeakPtr res (Just (destroyCircuit res RequestedDestroy))
+              let newent = Entry exitNode weak
+              modifyMVar_ (cmOpenCircuits cm)
+                (return . replaceEntry exitNode newent)
               return res
   --
   removeEntry _        [] = []
-  removeEntry exitNode (Pending en _ : rest)
-    | exitNode == en = removeEntry exitNode rest
-  removeEntry exitNode (Entry en _   : rest)
-    | exitNode == en = removeEntry exitNode rest
-  removeEntry exitNode (x            : rest)
-                     = x : removeEntry exitNode rest
+  removeEntry exitNode (x : rest)
+    | exitNode == ceExitNode x = removeEntry exitNode rest
+    | otherwise                = x : removeEntry exitNode rest
   --
   replaceEntry _        _   [] = []
-  replaceEntry exitNode new (Pending en _ : rest)
-    | exitNode == en = new : replaceEntry exitNode new rest
-  replaceEntry exitNode new (Entry   en _ : rest)
-    | exitNode == en = new : replaceEntry exitNode new rest
-  replaceEntry exitNode new (x            : rest)
-                     = x   : replaceEntry exitNode new rest
+  replaceEntry exitNode new (x : rest)
+    | exitNode == ceExitNode x = new : replaceEntry exitNode new rest
+    | otherwise                = x   : replaceEntry exitNode new rest
 
 closeCircuit :: CircuitManager -> TorEntrance -> IO ()
 closeCircuit = undefined
 
-buildNewCircuit :: CircuitManager -> IO TorEntrance
-buildNewCircuit = undefined
-
-advanceIndex :: Enum a => MVar a -> IO a
-advanceIndex idxMV = modifyMVar idxMV (\ x -> return (succ x, x))
+buildNewCircuit :: CircuitManager -> RouterDesc -> Int -> IO TorEntrance
+buildNewCircuit cm exitNode len =
+  do entrance <- getRouter (cmRouterDB cm) [NotRounter exitNode]
+     circ     <- createCircuit undefined entrance
 
 snoc :: [a] -> a -> [a]
 snoc []       x = [x]
