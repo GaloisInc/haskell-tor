@@ -1,5 +1,5 @@
 module Tor.Circuit(
-         TorEntrance
+         TorCircuit
        , createCircuit
        , extendCircuit
        , destroyCircuit
@@ -14,7 +14,7 @@ module Tor.Circuit(
        )
  where
 
-import Control.Concurrent.MVar
+import Control.Concurrent
 import Control.Exception
 import Control.Monad
 import Crypto.Cipher.AES
@@ -47,6 +47,13 @@ import Tor.RouterDesc
 -- -----------------------------------------------------------------------------
 
 type ConnectionResp = Either RelayEndReason TorConnection
+
+data TorCircuit = TorCircuit {
+       circLink            :: TorLink
+     , circId              :: Word32
+     , circForeCryptoData  :: MVar [(EncryptionState, Context SHA1)]
+     , circBackCryptoData  :: MVar [(EncryptionState, Context SHA1)]
+     }
 
 data TorEntrance = TorEntrance {
       circForwardLink        :: TorLink
@@ -98,7 +105,7 @@ circSendUpstream _ _ =
 
 createCircuit :: MVar TorRNG -> (String -> IO ()) ->
                  TorLink -> RouterDesc -> Word32 ->
-                 IO TorEntrance
+                 IO TorCircuit
 createCircuit rngMV llog link firstRouter circId =
   do x <- modifyMVar rngMV (return . generateLocal')
      let PublicNumber gx = calculatePublic oakley2 x
@@ -106,7 +113,7 @@ createCircuit rngMV llog link firstRouter circId =
      let nodePub = routerOnionKey firstRouter
      egx <- hybridEncrypt True nodePub gxBS
      linkWrite link (Create circId egx)
-     createResp <- linkRead link
+     createResp <- linkRead link circId
      case createResp of
        Created cid bstr
                                               -- DH_LEN + HASH_LEN
@@ -117,24 +124,16 @@ createCircuit rngMV llog link firstRouter circId =
               Right (fencstate, bencstate) ->
                 do fencMV <- newMVar [fencstate]
                    bencMV <- newMVar [bencstate]
-                   strmMV <- newMVar 1
-                   ewMV   <- newEmptyMVar
-                   rsvMV  <- newMVar Map.empty
-                   conMV  <- newMVar Map.empty
-                   dbfMV  <- newMVar Map.empty
-                   let circ = TorEntrance {
-                                circForwardLink        = link
-                              , circCircuitId          = circId
-                              , circNextStreamId       = strmMV
-                              , circExtendWaiter       = ewMV
-                              , circResolveWaiters     = rsvMV
-                              , circConnectionWaiters  = conMV
-                              , circDataBuffers        = dbfMV
-                              , circForwardCryptoData  = fencMV
-                              , circBackwardCryptoData = bencMV
+                   let circ = TorCircuit {
+                                circLink           = link
+                              , circId             = circId
+                              , circForeCryptoData = fencMV
+                              , circBackCryptoData = bencMV
                               }
-                       _handler' = backwardRelayHandler llog circ
+                   --    _handler' = backwardRelayHandler llog circ
                    -- modifyCircuitHandler link circId handler'
+                   forkIO_ $ forever $ linkRead link circId >>=
+                                       processBackwardInput bencMV llog
                    return circ
          | otherwise ->
              failLog ("Got CREATED message with bad length")
@@ -144,6 +143,55 @@ createCircuit rngMV llog link firstRouter circId =
          failLog ("Unacceptable response to CREATE message.")
  where
   failLog str = llog str >> throwIO (userError str)
+
+-- Process input coming from downstream back upstream.
+processBackwardInput :: MVar [(EncryptionState, Context SHA1)] ->
+                        (String -> IO ()) ->
+                        TorCell ->
+                        IO ()
+processBackwardInput bcdMV llog cell =
+  case cell of
+    Relay circId body ->
+      do clearBody <- modifyMVar bcdMV (return . decryptUntilClean body)
+         case clearBody of
+           Nothing -> circSendUpstream undefined (Relay circId body)
+           Just x ->
+             case x of
+               _ -> undefined
+--               RelayData{}      -> addDataBlock x (relayData x)
+--               RelayEnd{}       -> do destroyConnection x    (relayEndReason x)
+--                                      destroyCircuit    circ CircuitDestroyed
+--               RelayConnected{} -> finalizeConnect x
+--               RelaySendMe{}    -> llog ("Received (B) RELAY_SENDME")
+--               RelayExtended{}  -> continueExtend (relayExtendedData x)
+--               RelayTruncated{} -> answerResolve x []
+--               RelayDrop{}      -> return ()
+--               RelayResolved{}  -> answerResolve x (relayResolvedAddrs x)
+--               RelayExtended2{} -> return () -- FIXME
+--               _                -> return ()
+    RelayEarly circId body ->
+      -- Treat RelayEarly as Relay. This could be a problem. FIXME?
+      processBackwardInput bcdMV llog (Relay circId body)
+    Destroy _ reason ->
+      undefined
+--      do llog ("Circuit destroyed: " ++ show reason)
+--         destroyCircuit circ reason
+    _ ->
+      llog ("Spurious message along relay.")
+ where
+  decryptUntilClean :: ByteString -> [(EncryptionState, Context SHA1)] ->
+                       ([(EncryptionState, Context SHA1)], Maybe RelayCell)
+  decryptUntilClean _    []                    = ([], Nothing)
+  decryptUntilClean bstr ((encstate, h1):rest) =
+    let (bstr', encstate') = decryptData encstate bstr
+    in case runGetOrFail (parseRelayCell h1) (BSL.fromStrict bstr') of
+         Left _ ->
+           let (rest', res) = decryptUntilClean bstr' rest
+           in ((encstate', h1) : rest', res)
+         Right (_, _, (x, h1')) ->
+           (((encstate', h1') : rest), Just x)
+
+
 
 -- |Given a circuit, extend the end to the given router.
 extendCircuit :: MVar TorRNG -> (String -> IO ()) ->
@@ -515,3 +563,6 @@ computeTAPValues b ga = (kh, (encsf, fhash), (encsb, bhash))
 kdfTor :: ByteString -> ByteString
 kdfTor k0 = BS.concat (map kdfTorChunk [0..255])
   where kdfTorChunk x = sha1 (BS.snoc k0 x)
+
+forkIO_ :: IO () -> IO ()
+forkIO_ m = forkIO m >> return ()

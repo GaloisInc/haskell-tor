@@ -31,6 +31,8 @@ import Data.ByteString.Char8(pack)
 import Data.Hourglass
 import Data.Hourglass.Now
 import Data.IORef
+import Data.Map.Strict(Map)
+import qualified Data.Map.Strict as Map
 import Data.Tuple(swap)
 import Data.Word
 import Data.X509 hiding (HashSHA1, HashSHA256)
@@ -54,12 +56,18 @@ data TorLink = TorLink {
      , linkRouterDesc        :: Maybe RouterDesc
      , linkInitiatedRemotely :: Bool
      , linkReaderThread      :: ThreadId
-     , linkReadBuffer        :: Chan TorCell
+     , linkReadBuffers       :: MVar (Map Word32 (Chan TorCell))
      }
 
--- |Read the next incoming cell from a link.
-linkRead :: TorLink -> IO TorCell
-linkRead = readChan . linkReadBuffer
+-- |Read the next incoming cell from the given circuit identifier on the given
+-- link. This will throw an exception if the circuit has been appropriately
+-- registered.
+linkRead :: TorLink -> Word32 -> IO TorCell
+linkRead link circ =
+  do chanMap <- readMVar (linkReadBuffers link)
+     case Map.lookup circ chanMap of
+       Nothing   -> throwIO (userError ("Read from unknown circ " ++ show circ))
+       Just chan -> readChan chan
 
 -- |Write a cell to the link.
 linkWrite :: TorLink -> TorCell -> IO ()
@@ -135,14 +143,14 @@ initLink ns creds rngMV myAddrsMV llog them =
             llog ("Created new link to " ++ routerIPv4Address them ++
                   if null (routerNickname them) then "" else
                      (" (" ++ show (routerNickname them) ++ ")"))
-            bufCh <- newChan
+            bufCh <- newMVar Map.empty
             thr   <- forkIO (runLink llog bufCh tls [left])
             return (TorLink tls (Just them) False thr bufCh)
 
-runLink :: (String -> IO ()) -> Chan TorCell ->
+runLink :: (String -> IO ()) -> MVar (Map Word32 (Chan TorCell)) ->
            Context -> [ByteString] ->
            IO ()
-runLink llog rChan context initialBS =
+runLink llog rChansMV context initialBS =
   catch (run initialState initialBS) logException
  where
   logException :: SomeException -> IO ()
@@ -152,11 +160,44 @@ runLink llog rChan context initialBS =
   --
   initialState = runGetIncremental getTorCell
   --
-  run   (Fail    _    _ e)    _        = llog ("Error reading link: " ++ e)
-  run x@(Partial _)           []       = recvData context >>= (\ b -> run x [b])
-  run   (Partial next)        (f:rest) = run (next (Just f)) rest
-  run   (Done    r1   _ x)    r2       = do writeChan rChan x
-                                            run initialState (r1:r2)
+  run x bstrs =
+    case x of
+      Fail _ _ e   -> llog ("Error reading link: " ++ e)
+      Partial next ->
+        case bstrs of
+          []       -> recvData context >>= (\ b -> run x [b])
+          (f:rest) -> run (next (Just f)) rest
+      Done r1 _ c  -> process c >> run initialState (r1:bstrs)
+  --
+  process x =
+    case x of
+      -- Section #1: Requests to create new circuits.
+      Create _circId _bstr  ->
+        llog ("Received CREATE on link.") -- FIXME
+      CreateFast _circId _bstr ->
+        llog ("Received CREATEFAST on link.") -- FIXME
+      Create2 _circId _htype _bstr ->
+        llog ("Received CREATE2 on link.") -- FIXME
+      -- Section #2: Responses to us, or relay packets, to be passed
+      -- on to a higher layer.
+      Created     circId _   -> sendUpProtocol circId x
+      CreatedFast circId _ _ -> sendUpProtocol circId x
+      Created2    circId _   -> sendUpProtocol circId x
+      Destroy     circId _   -> sendUpProtocol circId x
+      Relay       circId _   -> sendUpProtocol circId x
+      RelayEarly  circId _   -> sendUpProtocol circId x
+      -- Section #3: Padding, which we should ignore
+      Padding    -> return ()
+      VPadding _ -> return ()
+      -- Section #4: Everything else ... none of which we should
+      -- get here.
+      _ -> llog ("Spurious cell read on link.")
+  --
+  sendUpProtocol circId x =
+    do rmap <- readMVar rChansMV
+       case Map.lookup circId rmap of
+         Nothing -> llog ("Received cell to unknown circuit " ++ show circId)
+         Just c  -> writeChan c x
 
 -- -- -----------------------------------------------------------------------------
 -- 
@@ -534,7 +575,7 @@ acceptLink creds routerDB rngMV myAddrsMV llog sock who =
            unless res $
              fail "Signature verification failure in AUTHENITCATE cell."
            --
-           bufCh <- newChan
+           bufCh <- newMVar Map.empty
            thr   <- forkIO (runLink llog bufCh tls [leftOver])
            desc  <- findRouter routerDB cid
            llog ("Incoming link created from " ++ show who)

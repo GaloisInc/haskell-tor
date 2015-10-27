@@ -36,11 +36,11 @@ data CircuitManager = NoCircuitManager
 
 data CircuitEntry = Pending {
                       ceExitNode        :: RouterDesc
-                    , _cePendingEntrance :: Async TorEntrance
+                    , _cePendingEntrance :: Async TorCircuit
                     }
                   | Entry {
                       ceExitNode        :: RouterDesc
-                    , _ceWeakEntrance    :: Weak TorEntrance
+                    , _ceWeakEntrance    :: Weak TorCircuit
                     }
 
 newCircuitManager :: HasBackend s =>
@@ -58,7 +58,7 @@ newCircuitManager opts rdb _lm =
 
 -- |Open a circuit to an exit node that allows connections to the given
 -- host and port.
-openCircuit :: CircuitManager -> String -> Word16 -> IO TorEntrance
+openCircuit :: CircuitManager -> String -> Word16 -> IO TorCircuit
 openCircuit NoCircuitManager _ _ = fail "This node doesn't support entrance."
 openCircuit cm dest port =
   join $ modifyMVar (cmOpenCircuits cm) $ \ circs ->
@@ -88,7 +88,7 @@ openCircuit cm dest port =
       | ceExitNode x `meetsRestrictions` restricts = Just (x, rest ++ acc)
       | otherwise                                  = loop rest (snoc acc x)
   --
-  waitAndUpdate :: RouterDesc -> Async TorEntrance -> IO TorEntrance
+  waitAndUpdate :: RouterDesc -> Async TorCircuit -> IO TorCircuit
   waitAndUpdate exitNode pendRes =
     do eres <- waitCatch pendRes
        case eres of
@@ -113,10 +113,10 @@ openCircuit cm dest port =
     | exitNode == ceExitNode x = new : replaceEntry exitNode new rest
     | otherwise                = x   : replaceEntry exitNode new rest
 
-closeCircuit :: CircuitManager -> TorEntrance -> IO ()
+closeCircuit :: CircuitManager -> TorCircuit -> IO ()
 closeCircuit = undefined
 
-buildNewCircuit :: CircuitManager -> RouterDesc -> Int -> IO TorEntrance
+buildNewCircuit :: CircuitManager -> RouterDesc -> Int -> IO TorCircuit
 buildNewCircuit cm exitNode _len =
   do entrance <- modifyMVar (cmRNG cm)
                     (getRouter (cmRouterDB cm) [NotRouter exitNode])
