@@ -4,8 +4,8 @@ module Tor.Circuit(
        , extendCircuit
        , destroyCircuit
        --
-       , buildRelay
-       , buildRelayFast
+--       , buildRelay
+--       , buildRelayFast
        --
        , TorConnection(..)
        , resolveName
@@ -14,7 +14,6 @@ module Tor.Circuit(
        )
  where
 
-import Control.Applicative
 import Control.Concurrent.MVar
 import Control.Exception
 import Control.Monad
@@ -36,8 +35,6 @@ import Data.Map.Strict(Map)
 import qualified Data.Map.Strict as Map
 import Data.Tuple
 import Data.Word
-import Data.X509
-import Network.TLS(HasBackend)
 import Tor.DataFormat.RelayCell
 import Tor.DataFormat.TorAddress
 import Tor.DataFormat.TorCell
@@ -55,7 +52,7 @@ data TorEntrance = TorEntrance {
       circForwardLink        :: TorLink
     , circCircuitId          :: Word32
     , circNextStreamId       :: MVar Word16
-    , circExtendWaiter       :: MVar (Either DestroyReason ByteString)
+    , circExtendWaiter       :: MVar ByteString
     , circResolveWaiters     :: MVar (Map Word16 (MVar [(TorAddress, Word32)]))
     , circConnectionWaiters  :: MVar (Map Word16 (MVar ConnectionResp))
     , circDataBuffers        :: MVar (Map Word16 (MVar ByteString))
@@ -67,19 +64,18 @@ data ForwardState = ForwardLink {
                       flLink                :: TorLink
                     , flCircuitId           :: Word32
                     }
-                  | ForwardExtending {
-                    }
+                  | ForwardExtending
                   | ForwardExit {
                     }
                   | ForwardDeadEnd
 
 
 data TorRelay = TorRelay {
-      relayBackwardLink        :: TorLink
-    , relayBackwardCircId      :: Word32
-    , relayForwardCryptoData   :: MVar (EncryptionState, Context SHA1)
+      relayBackwardLink       :: TorLink
+    , relayBackwardCircId     :: Word32
+    , relayForwardCryptoData  :: MVar (EncryptionState, Context SHA1)
     , _relayBackwardCryptoData :: MVar (EncryptionState, Context SHA1)
-    , relayForwardStates       :: MVar ForwardState
+    , relayForwardStates      :: MVar ForwardState
     }
 
 -- Send a cell downstream in the circuit, in the cirection of the CREATE
@@ -95,6 +91,7 @@ data TorRelay = TorRelay {
 circSendUpstream :: TorEntrance -> TorCell -> IO ()
 circSendUpstream _ _ =
   do putStrLn "WARNING: circSendUpstream"
+     _ <- undefined TorRelay
      return ()
 
 -- -----------------------------------------------------------------------------
@@ -103,7 +100,7 @@ createCircuit :: MVar TorRNG -> (String -> IO ()) ->
                  TorLink -> RouterDesc -> Word32 ->
                  IO TorEntrance
 createCircuit rngMV llog link firstRouter circId =
-  do x <- modifyMVar rngMV generateLocal'
+  do x <- modifyMVar rngMV (return . generateLocal')
      let PublicNumber gx = calculatePublic oakley2 x
          gxBS = i2ospOf_ 128 gx
      let nodePub = routerOnionKey firstRouter
@@ -136,21 +133,24 @@ createCircuit rngMV llog link firstRouter circId =
                               , circForwardCryptoData  = fencMV
                               , circBackwardCryptoData = bencMV
                               }
-                       handler' = backwardRelayHandler circ
-                   modifyCircuitHandler link circId handler'
+                       _handler' = backwardRelayHandler llog circ
+                   -- modifyCircuitHandler link circId handler'
                    return circ
          | otherwise ->
              failLog ("Got CREATED message with bad length")
-       Destroyed _ reason ->
+       Destroy _ reason ->
          failLog ("Target circuit entrance refused handshake: " ++ show reason)
+       _ ->
+         failLog ("Unacceptable response to CREATE message.")
  where
   failLog str = llog str >> throwIO (userError str)
 
 -- |Given a circuit, extend the end to the given router.
-extendCircuit :: TorState ls s -> TorEntrance -> RouterDesc ->
+extendCircuit :: MVar TorRNG -> (String -> IO ()) ->
+                 TorEntrance -> RouterDesc ->
                  IO (Either String ())
-extendCircuit torst circ nextRouter =
-  do x <- withRNG torst generateLocal'
+extendCircuit rngMV _llog circ nextRouter =
+  do x <- modifyMVar rngMV (return . generateLocal')
      let PublicNumber gx = calculatePublic oakley2 x
          gxBS = i2ospOf_ 128 gx
      egx <- hybridEncrypt True (routerOnionKey nextRouter) gxBS
@@ -175,43 +175,43 @@ extendCircuit torst circ nextRouter =
 
 -- -----------------------------------------------------------------------------
 
-buildRelay :: TorState ls s -> TorLink -> Word32 -> ByteString -> IO ()
-buildRelay torst link circId egx = catch buildInCircuit' internalError
- where
-  buildInCircuit' =
-    do (_, PrivKeyRSA nodePriv) <- getOnionCredentials torst
-       gxBS                     <- hybridDecrypt nodePriv egx
-       y                        <- withRNG torst generateLocal'
-       let gx              = PublicNumber (os2ip gxBS)
-           PublicNumber gy = calculatePublic oakley2 y
-           gyBS            = i2ospOf_ 128 gy
-           (kh, f, b)      = computeTAPValues y gx
-           resp            = gyBS `BS.append` kh
-       fMV  <- newMVar f
-       bMV  <- newMVar b
-       flMV <- newMVar ForwardDeadEnd
-       let relay = TorRelay link circId fMV bMV flMV
-       modifyCircuitHandler link circId (forwardRelayHandler torst relay)
-       writeCell link (Created circId resp)
-  --
-  internalError :: SomeException -> IO ()
-  internalError e =
-    do logMsg torst ("Internal error building circuit: " ++ show e)
-       writeCell link (Destroy circId InternalError)
-
-buildRelayFast :: TorState ls s -> TorLink -> Word32 -> ByteString -> IO ()
-buildRelayFast = error "FIXME: buildRelayFast"
+-- buildRelay :: TorState ls s -> TorLink -> Word32 -> ByteString -> IO ()
+-- buildRelay torst link circId egx = catch buildInCircuit' internalError
+--  where
+--   buildInCircuit' =
+--     do (_, PrivKeyRSA nodePriv) <- getOnionCredentials torst
+--        gxBS                     <- hybridDecrypt nodePriv egx
+--        y                        <- withRNG torst generateLocal'
+--        let gx              = PublicNumber (os2ip gxBS)
+--            PublicNumber gy = calculatePublic oakley2 y
+--            gyBS            = i2ospOf_ 128 gy
+--            (kh, f, b)      = computeTAPValues y gx
+--            resp            = gyBS `BS.append` kh
+--        fMV  <- newMVar f
+--        bMV  <- newMVar b
+--        flMV <- newMVar ForwardDeadEnd
+--        let relay = TorRelay link circId fMV bMV flMV
+--        modifyCircuitHandler link circId (forwardRelayHandler torst relay)
+--        writeCell link (Created circId resp)
+--   --
+--   internalError :: SomeException -> IO ()
+--   internalError e =
+--     do logMsg torst ("Internal error building circuit: " ++ show e)
+--        writeCell link (Destroy circId InternalError)
+-- 
+-- buildRelayFast :: TorState ls s -> TorLink -> Word32 -> ByteString -> IO ()
+-- buildRelayFast = error "FIXME: buildRelayFast"
 
 -- -----------------------------------------------------------------------------
 
 -- Destroy the circuit, sending the given reason upstream.
 destroyCircuit :: TorEntrance -> DestroyReason -> IO ()
 destroyCircuit circ reason =
-  do _ <- tryPutMVar (circExtendWaiter circ) (Left reason)
+  do -- _ <- tryPutMVar (circExtendWaiter circ) (Left reason)
      let circId = circCircuitId circ
          link   = circForwardLink circ
-     writeCell link (Destroy circId reason)
-     endCircuit link circId
+     linkWrite link (Destroy circId reason)
+     --endCircuit link circId
 
 -- -----------------------------------------------------------------------------
 
@@ -266,7 +266,7 @@ writeCellOnCircuit circ relay =
   do keysnhashes <- takeMVar (circForwardCryptoData circ)
      let (cell, keysnhashes') = synthesizeRelay keysnhashes
          circId               = circCircuitId circ
-     writeCell (circForwardLink circ) (pickBuilder relay circId cell)
+     linkWrite (circForwardLink circ) (pickBuilder relay circId cell)
      putMVar (circForwardCryptoData circ) keysnhashes'
  where
   synthesizeRelay [] = error "synthesizeRelay reached empty list?!"
@@ -291,13 +291,13 @@ getNextStreamId circ = modifyMVar (circNextStreamId circ) $ \ x ->
 
 -- This handler is called when we receive data from an earlier link in the
 -- circuit. Thus, traffic we receive is moving forward through the network.
-forwardRelayHandler :: TorState ls s -> TorRelay -> TorCell -> IO ()
-forwardRelayHandler torst circ cell =
+_forwardRelayHandler :: (String -> IO ()) -> TorRelay -> TorCell -> IO ()
+_forwardRelayHandler llog circ cell =
   case cell of
     Relay _ body      -> forwardRelay Relay      body
     RelayEarly _ body -> forwardRelay RelayEarly body
-    Destroy _ reason  -> logMsg torst ("Relay destroyed: " ++ show reason)
-    _                 -> logMsg torst ("Spurious message across relay.")
+    Destroy _ reason  -> llog ("Relay destroyed: " ++ show reason)
+    _                 -> llog ("Spurious message across relay.")
  where
   forwardRelay builder body =
     do (encstate, hashstate) <- takeMVar (relayForwardCryptoData circ)
@@ -314,18 +314,18 @@ forwardRelayHandler torst circ cell =
     do fstate <- takeMVar (relayForwardStates circ)
        case fstate of
          ForwardLink{} ->
-            do writeCell (flLink fstate) (builder (flCircuitId fstate) bstr)
+            do linkWrite (flLink fstate) (builder (flCircuitId fstate) bstr)
                putMVar (relayForwardStates circ) fstate
          ForwardExtending{} ->
             do putMVar (relayForwardStates circ) ForwardDeadEnd
                let dst = Destroy (relayBackwardCircId circ) TorProtocolViolation
-               writeCell (relayBackwardLink circ) dst
-               endCircuit (relayBackwardLink circ) (relayBackwardCircId circ)
+               linkWrite (relayBackwardLink circ) dst
+               --endCircuit (relayBackwardLink circ) (relayBackwardCircId circ)
          ForwardExit{} ->
             do putMVar (relayForwardStates circ) ForwardDeadEnd
                let dst = Destroy (relayBackwardCircId circ) TorProtocolViolation
-               writeCell (relayBackwardLink circ) dst
-               endCircuit (relayBackwardLink circ) (relayBackwardCircId circ)
+               linkWrite (relayBackwardLink circ) dst
+               --endCircuit (relayBackwardLink circ) (relayBackwardCircId circ)
          ForwardDeadEnd ->
             return ()
   --
@@ -341,8 +341,8 @@ forwardRelayHandler torst circ cell =
 
 -- This handler is called when we receive data from the next link in the
 -- circuit. Thus, traffic we receive is moving backwards through the network.
-backwardRelayHandler :: TorEntrance -> TorCell -> IO ()
-backwardRelayHandler circ cell =
+backwardRelayHandler :: (String -> IO ()) -> TorEntrance -> TorCell -> IO ()
+backwardRelayHandler llog circ cell =
   case cell of
     Relay cnum body ->
       do keysnhashes <- takeMVar (circBackwardCryptoData circ)
@@ -356,7 +356,7 @@ backwardRelayHandler circ cell =
                RelayEnd{}       -> do destroyConnection x    (relayEndReason x)
                                       destroyCircuit    circ CircuitDestroyed
                RelayConnected{} -> finalizeConnect x
-               RelaySendMe{}    -> logMsg torst ("Received (B) RELAY_SENDME")
+               RelaySendMe{}    -> llog ("Received (B) RELAY_SENDME")
                RelayExtended{}  -> continueExtend (relayExtendedData x)
                RelayTruncated{} -> answerResolve x []
                RelayDrop{}      -> return ()
@@ -365,12 +365,12 @@ backwardRelayHandler circ cell =
                _                -> return ()
     RelayEarly cnum body ->
       -- Treat RelayEarly as Relay. This could be a problem. FIXME?
-      backwardRelayHandler torst circ (Relay cnum body)
+      backwardRelayHandler llog circ (Relay cnum body)
     Destroy _ reason ->
-      do logMsg torst ("Circuit destroyed: " ++ show reason)
+      do llog ("Circuit destroyed: " ++ show reason)
          destroyCircuit circ reason
     _ ->
-      logMsg torst ("Spurious message along relay.")
+      llog ("Spurious message along relay.")
  where
   addDataBlock x block =
     do mmv <- getDeleteFromMap (circDataBuffers circ) (relayStreamId x)
@@ -388,7 +388,7 @@ backwardRelayHandler circ cell =
          Just mv -> putMVar mv result
   --
   continueExtend extdata =
-    do ok <- tryPutMVar (circExtendWaiter circ) (Right extdata)
+    do ok <- tryPutMVar (circExtendWaiter circ) extdata
        unless ok $ destroyCircuit circ InternalError
   --
   destroyConnection x reason =
@@ -483,12 +483,10 @@ xorBS a b = BS.pack (BS.zipWith xor a b)
 generateLocal' :: TorRNG -> (TorRNG, PrivateNumber)
 generateLocal' g = swap (withDRG g (generatePrivate oakley2))
 
-completeTAPHandshake :: PrivateNumber ->
-                        Either DestroyReason ByteString ->
+completeTAPHandshake :: PrivateNumber -> ByteString ->
                         Either String ((EncryptionState, Context SHA1),
                                        (EncryptionState, Context SHA1))
-completeTAPHandshake _ (Left drsn)   = Left (show drsn)
-completeTAPHandshake x (Right rbstr)
+completeTAPHandshake x rbstr
   | kh == kh' = Right (f, b)
   | otherwise = Left "Key agreement failure."
  where

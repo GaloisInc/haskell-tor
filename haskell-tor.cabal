@@ -75,6 +75,7 @@ library
                       Tor.State.CircuitManager,
                       Tor.State.Credentials,
                       Tor.State.Directories,
+                      Tor.State.LinkManager,
                       Tor.State.Routers
 
   if flag(network)

@@ -1,5 +1,6 @@
 module Tor.State.CircuitManager(
-         startCircuitManager
+         CircuitManager
+       , newCircuitManager
        , openCircuit
        , closeCircuit
        )
@@ -11,36 +12,41 @@ import Control.Exception
 import Control.Monad
 import Crypto.Random
 import Data.Word
+import Network.TLS(HasBackend)
 import System.Mem.Weak
+import Tor.Circuit
 import Tor.DataFormat.TorAddress
 import Tor.DataFormat.TorCell
 import Tor.Link
 import Tor.Options
 import Tor.RNG
 import Tor.RouterDesc
+import Tor.State.LinkManager
 import Tor.State.Routers
 
 data CircuitManager = NoCircuitManager
                     | CircuitManager {
                         cmCircuitLength :: Int
                       , cmRouterDB      :: RouterDB
+                      , cmLog           :: String -> IO ()
                       , cmRNG           :: MVar TorRNG
                       , cmOpenCircuits  :: MVar [CircuitEntry]
-                      , cmOpenLinks     :: MVar [TorLink]
+                      , _cmOpenLinks     :: MVar [TorLink]
                       }
 
 data CircuitEntry = Pending {
                       ceExitNode        :: RouterDesc
-                    , cePendingEntrance :: Async TorEntrance
+                    , _cePendingEntrance :: Async TorEntrance
                     }
                   | Entry {
                       ceExitNode        :: RouterDesc
-                    , ceWeakEntrance    :: Weak TorEntrance
+                    , _ceWeakEntrance    :: Weak TorEntrance
                     }
 
-
-startCircuitManager :: TorOptions -> RouterDB -> LinkManager -> IO CircuitManager
-startCircuitManager opts rdb lm =
+newCircuitManager :: HasBackend s =>
+                     TorOptions -> RouterDB -> LinkManager ls s ->
+                     IO CircuitManager
+newCircuitManager opts rdb _lm =
   case torEntranceOptions opts of
     Nothing      -> return NoCircuitManager
     Just entOpts ->
@@ -48,10 +54,7 @@ startCircuitManager opts rdb lm =
          rngMV  <- newMVar =<< drgNew
          circMV <- newMVar []
          linkMV <- newMVar []
-         setIncomingLinkHandler lm $ \ link ->
-           do modifyMVar_ linkMV (return . (link:))
-              runIncomingCircuit link
-         return (CircuitManager circLen rdb rngMV circMV linkMV)
+         return (CircuitManager circLen rdb (torLog opts) rngMV circMV linkMV)
 
 -- |Open a circuit to an exit node that allows connections to the given
 -- host and port.
@@ -114,9 +117,11 @@ closeCircuit :: CircuitManager -> TorEntrance -> IO ()
 closeCircuit = undefined
 
 buildNewCircuit :: CircuitManager -> RouterDesc -> Int -> IO TorEntrance
-buildNewCircuit cm exitNode len =
-  do entrance <- getRouter (cmRouterDB cm) [NotRounter exitNode]
-     circ     <- createCircuit undefined entrance
+buildNewCircuit cm exitNode _len =
+  do entrance <- modifyMVar (cmRNG cm)
+                    (getRouter (cmRouterDB cm) [NotRouter exitNode])
+     circ     <- createCircuit (cmRNG cm) (cmLog cm) undefined entrance 4
+     undefined circ -- FIXME
 
 snoc :: [a] -> a -> [a]
 snoc []       x = [x]

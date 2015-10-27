@@ -1,8 +1,7 @@
 {-# LANGUAGE ExistentialQuantification #-}
 module Tor(
          -- * Setup and initialization
-         TorNetworkStack(..)
-       , Tor
+         Tor
        , startTor
          -- * Options
        , module Tor.Options
@@ -16,41 +15,43 @@ module Tor(
        )
  where
 
-import Control.Concurrent
 import Control.Monad
 import Data.ByteString(ByteString)
 import Data.Maybe
 import Data.Word
 import Network.TLS
-import Tor.Link
 import Tor.NetworkStack hiding (connect)
 import Tor.Options
 import Tor.State.CircuitManager
 import Tor.State.Credentials
 import Tor.State.Directories
+import Tor.State.LinkManager
 import Tor.State.Routers
 
 type HostName = String
 
 -- |A handle to the current Tor system state.
-data Tor = forall ls s . Tor {
-       torOptions        :: TorOptions
-     , torCircuitManager :: CircuitManager
+data Tor = Tor {
+       _torOptions        :: TorOptions
+     , _torCircuitManager :: CircuitManager
      }
 
 -- |Start up the underlying Tor system, given a network stack to operate in and
 -- some setup options.
 startTor :: HasBackend s => TorNetworkStack ls s -> TorOptions -> IO Tor
-startTor ns opts =
-  do creds    <- newCredentials
-     dirDB    <- newDirectoryDatabase ns (torLog opts)
-     routerDB <- newRouterDatabase dirDB (torLog opts)
-     lm       <- initializeLinkManager opts ns routerDB creds
-     cm       <- startCircuitManager opts routerDB lm
+startTor ns o =
+  do creds    <- newCredentials (torLog o)
+     dirDB    <- newDirectoryDatabase ns (torLog o)
+     routerDB <- newRouterDatabase ns dirDB (torLog o)
+     lm       <- newLinkManager o ns routerDB creds
+     cm       <- newCircuitManager o routerDB lm
      when (not isRelay && isExit) $
-       do logm "WARNING: Requested exit without relay support: this is weird."
-          logm "WARNING: Please check that this is really what you want."
-     return (Tor opts cm)
+       do torLog o "WARNING: Requested exit without relay support: weird."
+          torLog o "WARNING: Please check that this is really what you want."
+     return (Tor o cm)
+ where
+  isRelay    = isJust (torRelayOptions o)
+  isExit     = isJust (torExitOptions o)
 
 -- -----------------------------------------------------------------------------
 
@@ -65,15 +66,10 @@ data ConnectionOptions = None
 data TorSocket = TorSocket
 
 connect :: Tor -> ConnectionOptions -> HostName -> Word16 -> IO TorSocket
-connect = undefined
+connect = undefined TorSocket
 
 writeBS :: TorSocket -> ByteString -> IO ()
 writeBS = undefined
 
 readBS :: TorSocket -> Int -> IO ByteString
 readBS = undefined
-
--- -----------------------------------------------------------------------------
-
-forkIO_ :: IO () -> IO ()
-forkIO_ m = forkIO m >> return ()
