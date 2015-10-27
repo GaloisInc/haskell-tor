@@ -10,6 +10,7 @@ module Tor.Link(
        , TorLink
        , initLink
        , linkInitiatedRemotely
+       , linkRouterDesc
        , linkRead
        , linkWrite
        , linkClose
@@ -140,6 +141,7 @@ setIncomingLinkHandler lm h =
 
 data TorLink = TorLink {
        linkContext           :: Context
+     , linkRouterDesc        :: Maybe RouterDesc
      , linkInitiatedRemotely :: Bool
      , linkReaderThread      :: ThreadId
      , linkReadBuffer        :: Chan TorCell
@@ -225,7 +227,7 @@ initLink ns creds rngMV myAddrsMV llog them =
                      (" (" ++ show (routerNickname them) ++ ")"))
             bufCh <- newChan
             thr   <- forkIO (runLink llog bufCh tls [left])
-            return (TorLink tls False thr bufCh)
+            return (TorLink tls (Just them) False thr bufCh)
 
 acceptIncoming :: HasBackend s => LinkManager ls s -> s -> TorAddress -> IO ()
 acceptIncoming lm sock who =
@@ -369,7 +371,8 @@ acceptIncoming lm sock who =
            --
            bufCh <- newChan
            thr   <- forkIO (runLink (lmLog lm) bufCh tls [leftOver])
-           let link = TorLink tls True thr bufCh
+           desc  <- findRouter (lmRouterDB lm) cid
+           let link = TorLink tls desc True thr bufCh
            linkHandler <- readMVar (lmIncomingLinkHandler lm)
            linkHandler link
            lmLog lm ("Incoming link created from " ++ show who)

@@ -99,59 +99,52 @@ circSendUpstream _ _ =
 
 -- -----------------------------------------------------------------------------
 
-createCircuit :: MVar TorRNG -> TorLink -> Word32 -> IO TorEntrance
-createCircuit rngMV link circId =
+createCircuit :: MVar TorRNG -> (String -> IO ()) ->
+                 TorLink -> RouterDesc -> Word32 ->
+                 IO TorEntrance
+createCircuit rngMV llog link firstRouter circId =
   do x <- modifyMVar rngMV generateLocal'
      let PublicNumber gx = calculatePublic oakley2 x
          gxBS = i2ospOf_ 128 gx
      let nodePub = routerOnionKey firstRouter
      egx <- hybridEncrypt True nodePub gxBS
-     writeCell link (Create circId egx)
-     initres <- takeMVar waitMV
-     case completeTAPHandshake x initres of
-       Left err -> return (Left err)
-       Right (fencstate, bencstate) ->
-         do fencMV <- newMVar [fencstate]
-            bencMV <- newMVar [bencstate]
-            strmMV <- newMVar 1
-            ewMV   <- newEmptyMVar
-            rsvMV  <- newMVar Map.empty
-            conMV  <- newMVar Map.empty
-            dbfMV  <- newMVar Map.empty
-            let circ = TorEntrance {
-                         circForwardLink        = link
-                       , circCircuitId          = circId
-                       , circNextStreamId       = strmMV
-                       , circExtendWaiter       = ewMV
-                       , circResolveWaiters     = rsvMV
-                       , circConnectionWaiters  = conMV
-                       , circDataBuffers        = dbfMV
-                       , circForwardCryptoData  = fencMV
-                       , circBackwardCryptoData = bencMV
-                       }
-                handler' = backwardRelayHandler torst circ
-            modifyCircuitHandler link circId handler'
-            return (Right circ)
+     linkWrite link (Create circId egx)
+     createResp <- linkRead link
+     case createResp of
+       Created cid bstr
+                                              -- DH_LEN + HASH_LEN
+         | (circId == cid) && (BS.length bstr == (128 + 20)) ->
+            case completeTAPHandshake x bstr of
+              Left err ->
+                failLog ("CREATE handshake failed: " ++ err)
+              Right (fencstate, bencstate) ->
+                do fencMV <- newMVar [fencstate]
+                   bencMV <- newMVar [bencstate]
+                   strmMV <- newMVar 1
+                   ewMV   <- newEmptyMVar
+                   rsvMV  <- newMVar Map.empty
+                   conMV  <- newMVar Map.empty
+                   dbfMV  <- newMVar Map.empty
+                   let circ = TorEntrance {
+                                circForwardLink        = link
+                              , circCircuitId          = circId
+                              , circNextStreamId       = strmMV
+                              , circExtendWaiter       = ewMV
+                              , circResolveWaiters     = rsvMV
+                              , circConnectionWaiters  = conMV
+                              , circDataBuffers        = dbfMV
+                              , circForwardCryptoData  = fencMV
+                              , circBackwardCryptoData = bencMV
+                              }
+                       handler' = backwardRelayHandler circ
+                   modifyCircuitHandler link circId handler'
+                   return circ
+         | otherwise ->
+             failLog ("Got CREATED message with bad length")
+       Destroyed _ reason ->
+         failLog ("Target circuit entrance refused handshake: " ++ show reason)
  where
-  failLeft (Left str) = error str
-  failLeft (Right x)  = x
-  --
-  createHandler :: TorLink -> MVar (Either DestroyReason ByteString) ->
-                   TorCell ->
-                   IO ()
-  createHandler link waitMV cell =
-    case cell of
-      Created circId bstr
-        | BS.length bstr == (128 + 20) -> -- DH_LEN + HASH_LEN
-            putMVar waitMV (Right bstr)
-        | otherwise ->
-            do logMsg torst ("Got CREATED message with bad length.")
-               endCircuit link circId
-      Destroy _ reason ->
-        putMVar waitMV (Left reason)
-      _ ->
-        logMsg torst ("Ignoring spurious message while waiting " ++
-                      "for CREATED: " ++ show cell)
+  failLog str = llog str >> throwIO (userError str)
 
 -- |Given a circuit, extend the end to the given router.
 extendCircuit :: TorState ls s -> TorEntrance -> RouterDesc ->
@@ -348,9 +341,8 @@ forwardRelayHandler torst circ cell =
 
 -- This handler is called when we receive data from the next link in the
 -- circuit. Thus, traffic we receive is moving backwards through the network.
-backwardRelayHandler :: TorState ls s -> TorEntrance ->
-                        TorCell -> IO ()
-backwardRelayHandler torst circ cell =
+backwardRelayHandler :: TorEntrance -> TorCell -> IO ()
+backwardRelayHandler circ cell =
   case cell of
     Relay cnum body ->
       do keysnhashes <- takeMVar (circBackwardCryptoData circ)

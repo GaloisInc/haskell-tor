@@ -3,6 +3,7 @@ module Tor.State.Routers(
          RouterDB
        , RouterRestriction(..)
        , newRouterDatabase
+       , findRouter
        , getRouter
        , meetsRestrictions
        )
@@ -11,6 +12,7 @@ module Tor.State.Routers(
 import Control.Concurrent
 import Control.Monad
 import Crypto.Hash.Easy
+import Crypto.PubKey.RSA.KeyHash
 import Crypto.PubKey.RSA.PKCS15
 import Crypto.Random
 import Data.Array
@@ -58,6 +60,13 @@ newRouterDatabase ns ddb logMsg =
   do rdbMV <- newEmptyMVar
      _ <- forkIO (updateConsensus ns ddb logMsg rdbMV)
      return (RouterDB rdbMV)
+
+-- |Find a router given its fingerprint.
+findRouter :: RouterDB -> ByteString -> IO (Maybe RouterDesc)
+findRouter (RouterDB routerDB) fprint =
+  (find fingerprintEq . rdbRouters) `fmap` readMVar routerDB
+ where
+  fingerprintEq x = keyHash' sha256 (routerSigningKey x) == fprint
 
 -- |Fetch a router matching the given restrictions. The restrictions list should
 -- be thought of an "AND" with a default of True given the empty list. This
