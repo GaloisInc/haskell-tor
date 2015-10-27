@@ -2,7 +2,7 @@ module Tor.State.LinkManager(
          LinkManager
        , newLinkManager
        , getLocalAddresses
-       , getLink
+       , newLinkCircuit
        , setIncomingLinkHandler
        )
  where
@@ -11,12 +11,14 @@ import Control.Concurrent
 import Control.Monad
 import Crypto.Random
 import Data.Maybe
+import Data.Word
 import Network.TLS hiding (Credentials)
 import Tor.DataFormat.TorAddress
 import Tor.Link
 import Tor.NetworkStack
 import Tor.Options
 import Tor.RNG
+import Tor.RouterDesc
 import Tor.State.Credentials
 import Tor.State.Routers
 
@@ -61,7 +63,8 @@ newLinkManager o ns routerDB creds =
           forkIO_ $ forever $
             do (sock, addr) <- accept ns lsock
                forkIO_ $
-                 do link <- acceptLink creds routerDB rngMV addrsMV (torLog o) sock addr
+                 do link <- acceptLink creds routerDB rngMV addrsMV
+                                       (torLog o) sock addr
                     modifyMVar_ linksMV (return . (link:))
      return lm
  where
@@ -74,30 +77,36 @@ newLinkManager o ns routerDB creds =
 getLocalAddresses :: HasBackend s => LinkManager ls s -> IO [TorAddress]
 getLocalAddresses = readMVar . lmAddresses
 
-getLink :: HasBackend s => LinkManager ls s -> [RouterRestriction] -> IO TorLink
-getLink lm restricts =
+newLinkCircuit :: HasBackend s =>
+                  LinkManager ls s -> [RouterRestriction] ->
+                  IO (TorLink, RouterDesc, Word32)
+newLinkCircuit lm restricts =
   modifyMVar (lmLinks lm) $ \ curLinks ->
     if length curLinks >= lmIdealLinks lm
        then getExistingLink curLinks []
        else buildNewLink    curLinks
  where
   getExistingLink :: [TorLink] -> [TorLink] ->
-                     IO ([TorLink], TorLink)
+                     IO ([TorLink], (TorLink, RouterDesc, Word32))
   getExistingLink []                 acc = buildNewLink acc
   getExistingLink (link:rest) acc
     | Just rd <- linkRouterDesc link
-    , rd `meetsRestrictions` restricts   = return (rest ++ acc, link)
-    | otherwise                          = getExistingLink rest (acc ++ [link])
+    , rd `meetsRestrictions` restricts   =
+        do circId <- modifyMVar (lmRNG lm) (linkNewCircuitId link)
+           return (rest ++ acc, (link, rd, circId))
+    | otherwise                          =
+        getExistingLink rest (acc ++ [link])
   --
   buildNewLink :: [TorLink] ->
-                  IO ([TorLink], TorLink)
+                  IO ([TorLink], (TorLink, RouterDesc, Word32))
   buildNewLink curLinks =
     do entranceDesc <- modifyMVar (lmRNG lm)
                          (getRouter (lmRouterDB lm) restricts)
        link         <- initLink (lmNetworkStack lm) (lmCredentials lm)
                          (lmRNG lm) (lmAddresses lm) (lmLog lm)
                          entranceDesc
-       return (curLinks ++ [link], link)
+       circId       <- modifyMVar (lmRNG lm) (linkNewCircuitId link)
+       return (curLinks ++ [link], (link, entranceDesc, circId))
 
 setIncomingLinkHandler :: HasBackend s =>
                           LinkManager ls s -> (TorLink -> IO ()) ->

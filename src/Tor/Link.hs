@@ -8,6 +8,7 @@ module Tor.Link(
        , linkRead
        , linkWrite
        , linkClose
+       , linkNewCircuitId
        )
  where
 
@@ -23,6 +24,7 @@ import Crypto.PubKey.RSA.PKCS15
 import Crypto.Random
 import Data.Binary.Get
 import Data.Binary.Put
+import Data.Bits
 import Data.ByteArray(convert)
 import Data.ByteString(ByteString)
 import qualified Data.ByteString as BS
@@ -33,6 +35,7 @@ import Data.Hourglass.Now
 import Data.IORef
 import Data.Map.Strict(Map)
 import qualified Data.Map.Strict as Map
+import qualified Data.Serialize.Get as Cereal
 import Data.Tuple(swap)
 import Data.Word
 import Data.X509 hiding (HashSHA1, HashSHA256)
@@ -83,7 +86,8 @@ linkClose link =
 -- |Create a direct link to the given tor node.  note that this routine performs
 -- some internal certificate checking, but you should verify that the
 -- certificate you expected from the connection is what you expected it to be.
--- YOU SHOULD PROBABLY NOT USE THIS ROUTINE. Instead, use getLink, above.
+-- YOU SHOULD PROBABLY NOT USE THIS ROUTINE. Instead, use 'newLinkCircuit',
+-- elsewhere.
 initLink :: HasBackend s =>
             TorNetworkStack ls s ->
             Credentials ->
@@ -200,23 +204,21 @@ runLink llog rChansMV context initialBS =
          Just c  -> writeChan c x
 
 -- -- -----------------------------------------------------------------------------
--- 
--- newRandomCircuit :: DRG g =>
---                     TorLink -> CircuitHandler -> g ->
---                     IO (Word32, g)
--- newRandomCircuit link handler g =
---   do let (bstr, g') = randomBytesGenerate 4 g
---          v          = runGet getWord32host (BSL.fromStrict bstr)
---          v' | linkInitiatedRemotely link = clearBit v 31
---             | otherwise                  = setBit v 31
---      curTable <- takeMVar (linkHandlerTable link)
---      if (v' == 0) || Map.member v' curTable
---         then do putMVar (linkHandlerTable link) curTable
---                 newRandomCircuit link handler g'
---         else do let table' = Map.insert v' handler curTable
---                 putMVar (linkHandlerTable link) table'
---                 return (v', g')
 
+linkNewCircuitId :: DRG g =>
+                    TorLink -> g ->
+                    IO (g, Word32)
+linkNewCircuitId link rng = modifyMVar (linkReadBuffers link) (find rng)
+ where
+  find g rtable =
+    do let (rv, g') = withRandomBytes g 4 (Cereal.runGet Cereal.getWord32host)
+           v  = either (const 0) id rv
+           v' | linkInitiatedRemotely link = clearBit v 31
+              | otherwise                  = setBit v 31
+       if (v' == 0) || Map.member (fromIntegral v') rtable
+         then find g' rtable
+         else do rChan <- newChan
+                 return (Map.insert (fromIntegral v') rChan rtable, (g', v'))
 
 -- -- -----------------------------------------------------------------------------
 

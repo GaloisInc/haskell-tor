@@ -34,7 +34,8 @@ main = runDefaultMain $ \ flags ->
                           }
                      }
      tor <- startTor ns options
-     return ()
+     addrs <- resolveName tor "www.whatismypublicip.com"
+     putStrLn ("Resolved to: " ++ show addrs)
 --
 --     buildCircularCircuit torState
 --
