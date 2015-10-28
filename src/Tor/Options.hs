@@ -54,7 +54,7 @@ data TorEntranceOptions = TorEntranceOptions {
 -- 6, and a target number of links of 5.
 defaultTorEntranceOptions :: TorEntranceOptions
 defaultTorEntranceOptions  = TorEntranceOptions {
-    torInternalCircuitLength = 6
+    torInternalCircuitLength = 2
   , torTargetLinks           = 5
   }
 

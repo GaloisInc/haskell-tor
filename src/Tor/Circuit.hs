@@ -11,9 +11,9 @@ module Tor.Circuit(
        , TorSocket(..)
        , connectToHost
        , connectToHost'
-       , readBS
-       , writeBS
-       , close
+       , torRead
+       , torWrite
+       , torClose
        )
  where
 
@@ -117,17 +117,28 @@ acceptCircuit = error "acceptCircuit"
 
 -- |Destroy a circuit, and all the streams and computations running through it.
 destroyCircuit :: TorCircuit -> DestroyReason -> IO ()
-destroyCircuit circ reason =
-  modifyMVar_ (circState circ) $ \ state ->
-    case state of
-      Left _ -> return state
-      Right threads ->
-        do mapM_ killThread threads
-           -- FIXME: Send a message out, kill the crypto after
-           _ <- takeMVar (circForeCryptoData circ)
-           _ <- takeMVar (circBackCryptoData circ)
-           circLog circ ("Destroy circuit " ++ show (circId circ))
-           return (Left reason)
+destroyCircuit circ rsn =
+  do ts <- modifyMVar (circState circ) $ \ state ->
+            case state of
+              Left _ -> return (state, [])
+              Right threads ->
+                do mapM_ killSockets =<< readMVar (circSockets circ)
+                   mapM_ killConnWaiters =<< readMVar (circConnWaiters circ)
+                   mapM_ killResWaiters =<< readMVar (circResolveWaiters circ)
+                   -- FIXME: Send a message out, kill the crypto after
+                   _ <- takeMVar (circForeCryptoData circ)
+                   _ <- takeMVar (circBackCryptoData circ)
+                   circLog circ ("Destroy circuit " ++ show (circId circ))
+                   return (Left rsn, threads)
+     mapM_ killThread ts
+ where
+  killSockets sock =
+    do modifyMVar_ (tsState sock) (const (return (Just ReasonDestroyed)))
+       writeChan (tsInChan sock) (Left ReasonDestroyed)
+  killConnWaiters mv =
+    void $ tryPutMVar mv (Left ("Underlying circuit destroyed: " ++ show rsn))
+  killResWaiters mv =
+    void $ tryPutMVar mv []
 
 extendCircuit :: TorCircuit -> RouterDesc -> IO ()
 extendCircuit circ nextRouter =
@@ -198,12 +209,17 @@ circSendUpstream = error "circSendUpstream"
 
 processBackwardInput :: TorCircuit -> TorCell -> IO ()
 processBackwardInput circ cell =
-  case cell of
-    Relay      circId body -> processBackwardRelay circ circId body
-    RelayEarly circId body -> processBackwardRelay circ circId body
-    Destroy    _      rsn  -> destroyCircuit circ rsn
-    _                      ->
-      circLog circ ("Spurious message along circuit.")
+  handle logException $
+    case cell of
+      Relay      circId body -> processBackwardRelay circ circId body
+      RelayEarly circId body -> processBackwardRelay circ circId body
+      Destroy    _      rsn  -> destroyCircuit circ rsn
+      _                      ->
+        circLog circ ("Spurious message along circuit.")
+ where
+  logException e =
+    circLog circ ("Caught exception processing backwards input: "
+                  ++ show (e :: SomeException))
 
 processBackwardRelay :: TorCircuit -> Word32 -> ByteString -> IO ()
 processBackwardRelay circ circId body =
@@ -235,7 +251,7 @@ processLocalBackwardsRelay circ x =
             circLog circ ("Dropping traffic to unknown stream " ++ show strmId)
           Just sock ->
             do state <- readMVar (tsState sock)
-               unless (isJust state) $ writeChan (tsInChan sock) bstr
+               unless (isJust state) $ writeChan (tsInChan sock) (Right bstr)
 
     RelayEnd{ relayStreamId = strmId, relayEndReason = rsn } ->
       modifyMVar_ (circSockets circ) $ \ smap ->
@@ -246,9 +262,9 @@ processLocalBackwardsRelay circ x =
             do modifyMVar_ (tsState sock) (const (return (Just rsn)))
                return (Map.delete strmId smap)
 
-    RelayConnected{ relayStreamId = strmId } ->
+    RelayConnected{ relayStreamId = tsStreamId } ->
       modifyMVar_ (circConnWaiters circ) $ \ cwaits ->
-        case Map.lookup strmId cwaits of
+        case Map.lookup tsStreamId cwaits of
           Nothing ->
             do circLog circ ("CONNECTED without waiter?")
                return cwaits
@@ -257,11 +273,15 @@ processLocalBackwardsRelay circ x =
                tsState    <- newMVar Nothing
                tsInChan   <- newChan
                tsLeftover <- newMVar S.empty
-               _ <- tryPutMVar wait (Right TorSocket{ .. })
-               return (Map.delete strmId cwaits)
+               let sock = TorSocket { .. }
+               modifyMVar_ (circSockets circ) $ \ socks ->
+                 return (Map.insert tsStreamId sock socks)
+               _ <- tryPutMVar wait (Right sock)
+               return (Map.delete tsStreamId cwaits)
 
     RelaySendMe {} ->
-      return ()
+      do circLog circ "SENDME"
+         return ()
 
     RelayExtended {} ->
       void $ tryPutMVar (circExtendWaiter circ) x
@@ -307,8 +327,9 @@ resolveName circ str =
 
 data TorSocket = TorSocket {
        tsCircuit  :: TorCircuit
+     , tsStreamId :: Word16
      , tsState    :: MVar (Maybe RelayEndReason)
-     , tsInChan   :: Chan ByteString
+     , tsInChan   :: Chan (Either RelayEndReason ByteString)
      , tsLeftover :: MVar ByteString
      }
 
@@ -338,14 +359,62 @@ connectToHost' circ addr port ip4ok ip6ok ip6pref =
   throwLeft (Left a)  = throwIO (userError a)
   throwLeft (Right x) = return x
 
-writeBS :: TorSocket -> ByteString -> IO ()
-writeBS = error "writeBS"
+-- |Write the given ByteString to the given Tor socket. Blocks until the entire
+-- ByteString has been written out to the network. Will throw an error if the
+-- socket has been closed.
+torWrite :: TorSocket -> ByteString -> IO ()
+torWrite sock block =
+  do state <- readMVar (tsState sock)
+     case state of
+       Just reason ->
+         throwIO (userError ("Write to closed socket: " ++ show reason))
+       Nothing ->
+         loop block
+ where
+  loop bstr
+   | S.null bstr = return ()
+   | otherwise   =
+       do let (cur, rest) = S.splitAt 503 bstr
+              strmId      = tsStreamId sock
+          writeCellOnCircuit (tsCircuit sock) (RelayData strmId cur)
+          loop rest
 
-readBS :: TorSocket -> Int -> IO L.ByteString
-readBS = error "readBS"
+-- |Read the given number of bytes from the socket. Blocks until either the
+-- entire buffer has been read or the socket closes for some reason. Will throw
+-- an error if the socket was closed before the read starts.
+torRead :: TorSocket -> Int -> IO L.ByteString
+torRead sock amt =
+  do state <- readMVar (tsState sock)
+     case state of
+       Just reason ->
+         throwIO (userError ("Read from closed socket: " ++ show reason))
+       Nothing ->
+         -- FIXME: End of connection issues.
+         modifyMVar (tsLeftover sock) $ \ headBuf ->
+           if S.length headBuf >= amt
+              then do let (res, headBuf') = S.splitAt amt headBuf
+                      return (headBuf', L.fromStrict res)
+              else do let amt' = amt - S.length headBuf
+                      res <- loop amt' [headBuf]
+                      return res
+ where
+  loop x acc =
+    do nextBuf <- readChan (tsInChan sock)
+       case nextBuf of
+         Left _ ->
+           return (S.empty, L.fromChunks (reverse acc))
+         Right buf | S.length buf >= x ->
+           do let (mine, leftover) = S.splitAt x buf
+              return (leftover, L.fromChunks (reverse (mine:acc)))
+         Right buf ->
+           loop (x - S.length buf) (buf : acc)
 
-close :: TorSocket -> DestroyReason -> IO ()
-close = error "close"
+torClose :: TorSocket -> RelayEndReason -> IO ()
+torClose sock reason =
+  do let strmId = tsStreamId sock
+     modifyMVar_ (tsState sock) (const (return (Just reason)))
+     modifyMVar_ (circSockets (tsCircuit sock)) (return . Map.delete strmId)
+     writeCellOnCircuit (tsCircuit sock) (RelayEnd strmId reason)
 
 -- ----------------------------------------------------------------------------
 
