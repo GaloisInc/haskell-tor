@@ -203,7 +203,7 @@ runLink llog rChansMV context initialBS =
          Nothing -> llog ("Received cell to unknown circuit " ++ show circId)
          Just c  -> writeChan c x
 
--- -- -----------------------------------------------------------------------------
+-- -----------------------------------------------------------------------------
 
 linkNewCircuitId :: DRG g =>
                     TorLink -> g ->
@@ -220,7 +220,7 @@ linkNewCircuitId link rng = modifyMVar (linkReadBuffers link) (find rng)
          else do rChan <- newChan
                  return (Map.insert (fromIntegral v') rChan rtable, (g', v'))
 
--- -- -----------------------------------------------------------------------------
+-- -----------------------------------------------------------------------------
 
 getRespInitialMsgs :: Context -> CertificateChain ->
                       IO (ByteString, ByteString,
