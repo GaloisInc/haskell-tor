@@ -121,6 +121,13 @@ openCircuit cm restricts =
 closeCircuit :: HasBackend s => CircuitManager ls s -> TorCircuit -> IO ()
 closeCircuit = error "closeCircuit"
 
+-- This is the code that actually builds a circuit, given an appropriate
+-- final node.
+--
+-- FIXME: Make sure that we don't use two routers within the same family.
+-- FIXME: Make sure that we don't use two routers within the same /16 subnet.
+-- FIXME: Use the path selection weighting criteria in path-spec.txt
+--
 buildNewCircuit :: HasBackend s =>
                    CircuitManager ls s -> RouterDesc -> Int ->
                    IO TorCircuit

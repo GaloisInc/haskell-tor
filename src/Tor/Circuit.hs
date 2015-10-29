@@ -254,13 +254,14 @@ processLocalBackwardsRelay circ x =
                unless (isJust state) $ writeChan (tsInChan sock) (Right bstr)
 
     RelayEnd{ relayStreamId = strmId, relayEndReason = rsn } ->
-      modifyMVar_ (circSockets circ) $ \ smap ->
-        case Map.lookup strmId smap of
-          Nothing ->
-            return smap
-          Just sock ->
-            do modifyMVar_ (tsState sock) (const (return (Just rsn)))
-               return (Map.delete strmId smap)
+       modifyMVar_ (circSockets circ) $ \ smap ->
+         case Map.lookup strmId smap of
+           Nothing ->
+             return smap
+           Just sock ->
+             do modifyMVar_ (tsState sock) (const (return (Just rsn)))
+                writeChan (tsInChan sock) (Left rsn)
+                return (Map.delete strmId smap)
 
     RelayConnected{ relayStreamId = tsStreamId } ->
       modifyMVar_ (circConnWaiters circ) $ \ cwaits ->
@@ -270,9 +271,10 @@ processLocalBackwardsRelay circ x =
                return cwaits
           Just wait ->
             do let tsCircuit = circ
-               tsState    <- newMVar Nothing
-               tsInChan   <- newChan
-               tsLeftover <- newMVar S.empty
+               tsState      <- newMVar Nothing
+               tsInChan     <- newChan
+               tsLeftover   <- newMVar S.empty
+               tsReadWindow <- newMVar 500 -- See spec, 7.4, stream flow
                let sock = TorSocket { .. }
                modifyMVar_ (circSockets circ) $ \ socks ->
                  return (Map.insert tsStreamId sock socks)
@@ -287,7 +289,7 @@ processLocalBackwardsRelay circ x =
       void $ tryPutMVar (circExtendWaiter circ) x
 
     RelayTruncated {} ->
-      do circLog circ "TRUNCATED"
+      do circLog circ ("TRUNCATED: " ++ show (relayTruncatedRsn x))
          return () -- FIXME
 
     RelayDrop {} ->
@@ -326,11 +328,12 @@ resolveName circ str =
 -- ----------------------------------------------------------------------------
 
 data TorSocket = TorSocket {
-       tsCircuit  :: TorCircuit
-     , tsStreamId :: Word16
-     , tsState    :: MVar (Maybe RelayEndReason)
-     , tsInChan   :: Chan (Either RelayEndReason ByteString)
-     , tsLeftover :: MVar ByteString
+       tsCircuit    :: TorCircuit
+     , tsStreamId   :: Word16
+     , tsState      :: MVar (Maybe RelayEndReason)
+     , tsReadWindow :: MVar Int
+     , tsInChan     :: Chan (Either RelayEndReason ByteString)
+     , tsLeftover   :: MVar ByteString
      }
 
 -- |Connect to the given address and port through the given circuit. The result
@@ -384,30 +387,37 @@ torWrite sock block =
 -- an error if the socket was closed before the read starts.
 torRead :: TorSocket -> Int -> IO L.ByteString
 torRead sock amt =
-  do state <- readMVar (tsState sock)
-     case state of
-       Just reason ->
-         throwIO (userError ("Read from closed socket: " ++ show reason))
-       Nothing ->
-         -- FIXME: End of connection issues.
-         modifyMVar (tsLeftover sock) $ \ headBuf ->
-           if S.length headBuf >= amt
-              then do let (res, headBuf') = S.splitAt amt headBuf
-                      return (headBuf', L.fromStrict res)
-              else do let amt' = amt - S.length headBuf
-                      res <- loop amt' [headBuf]
-                      return res
+  modifyMVar (tsLeftover sock) $ \ headBuf ->
+    if S.length headBuf >= amt
+       then do let (res, headBuf') = S.splitAt amt headBuf
+               return (headBuf', L.fromStrict res)
+       else do let amt' = amt - S.length headBuf
+               res <- loop amt' [headBuf]
+               return res
  where
   loop x acc =
     do nextBuf <- readChan (tsInChan sock)
+       join $ modifyMVar (tsReadWindow sock) $ \ strmWindow ->
+                do let newval = strmWindow - 1
+                   putStrLn ("newval = " ++ show newval)
+                   if newval <= 450
+                      then return (newval + 50, sendMe)
+                      else return (newval, return ())
        case nextBuf of
+         Left err | all S.null acc ->
+           do writeChan (tsInChan sock) nextBuf
+              throwIO (userError ("Read from closed socket: " ++ show err))
          Left _ ->
-           return (S.empty, L.fromChunks (reverse acc))
+           do writeChan (tsInChan sock) nextBuf
+              return (S.empty, L.fromChunks (reverse acc))
          Right buf | S.length buf >= x ->
            do let (mine, leftover) = S.splitAt x buf
               return (leftover, L.fromChunks (reverse (mine:acc)))
          Right buf ->
            loop (x - S.length buf) (buf : acc)
+  --
+  sendMe =
+    writeCellOnCircuit (tsCircuit sock) (RelaySendMe (tsStreamId sock))
 
 torClose :: TorSocket -> RelayEndReason -> IO ()
 torClose sock reason =

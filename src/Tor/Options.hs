@@ -51,10 +51,10 @@ data TorEntranceOptions = TorEntranceOptions {
      }
 
 -- |A reasonable set of entrance options. The internal circuit length is set to
--- 6, and a target number of links of 5.
+-- 4, and a target number of links of 5.
 defaultTorEntranceOptions :: TorEntranceOptions
 defaultTorEntranceOptions  = TorEntranceOptions {
-    torInternalCircuitLength = 2
+    torInternalCircuitLength = 4
   , torTargetLinks           = 5
   }
 
