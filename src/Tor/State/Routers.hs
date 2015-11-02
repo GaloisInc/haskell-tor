@@ -3,14 +3,20 @@ module Tor.State.Routers(
          RouterDB
        , RouterRestriction(..)
        , newRouterDatabase
+       , findRouter
        , getRouter
+       , meetsRestrictions
        )
  where
 
+#if !MIN_VERSION_base(4,8,0)
 import Control.Applicative
+import Data.Foldable(find)
+#endif
 import Control.Concurrent
 import Control.Monad
 import Crypto.Hash.Easy
+import Crypto.PubKey.RSA.KeyHash
 import Crypto.PubKey.RSA.PKCS15
 import Crypto.Random
 import Data.Array
@@ -20,6 +26,9 @@ import Data.ByteString(ByteString,unpack)
 import Data.Hourglass
 import Data.Hourglass.Now
 import Data.List
+#if !MIN_VERSION_base(4,8,0)
+    hiding (find)
+#endif
 import qualified Data.Map.Strict as Map
 import Data.Maybe
 import Data.Word
@@ -59,6 +68,13 @@ newRouterDatabase ns ddb logMsg =
      _ <- forkIO (updateConsensus ns ddb logMsg rdbMV)
      return (RouterDB rdbMV)
 
+-- |Find a router given its fingerprint.
+findRouter :: RouterDB -> ByteString -> IO (Maybe RouterDesc)
+findRouter (RouterDB routerDB) fprint =
+  (find fingerprintEq . rdbRouters) `fmap` readMVar routerDB
+ where
+  fingerprintEq x = keyHash' sha256 (routerSigningKey x) == fprint
+
 -- |Fetch a router matching the given restrictions. The restrictions list should
 -- be thought of an "AND" with a default of True given the empty list. This
 -- routine may take awhile to find a suitable entry if the restrictions are
@@ -74,46 +90,45 @@ getRouter (RouterDB routerDB) restrictions rng =
     do let (randBS, g') = randomBytesGenerate 8 g
        randWord <- fromIntegral <$> runGetIO getWord64be randBS
        let v = entries ! (randWord `mod` idxMod)
-       case v `meetsRestrictions` restrictions of
-         Nothing -> loop entries idxMod g'
-         Just v' -> return (g', v')
+       if v `meetsRestrictions` restrictions
+         then return (g', v)
+         else loop entries idxMod g'
   --
   runGetIO getter bstr =
     case runGet getter bstr of
       Left  _ -> fail "Cannot read 64-bit Word from 64 bytes ..."
       Right x -> return x
-  --
-  meetsRestrictions rtr []       = Just rtr
-  meetsRestrictions rtr (r:rest) =
-    case r of
-      IsStable | "Stable" `elem` routerStatus rtr  -> meetsRestrictions rtr rest
-               | otherwise                         -> Nothing
-      NotRouter rdesc | isSameRouter rtr rdesc     -> Nothing
-                      | otherwise                  -> meetsRestrictions rtr rest
-      NotTorAddr taddr | isSameAddr taddr rtr      -> Nothing
-                       | otherwise                 -> meetsRestrictions rtr rest
-      ExitNode | allowsExits (routerExitRules rtr) -> meetsRestrictions rtr rest
-               | otherwise                         -> Nothing
-      ExitNodeAllowing a p
-            | allowsExit (routerExitRules rtr) a p -> meetsRestrictions rtr rest
-            | otherwise                            -> Nothing
-  --
-  isSameRouter r1 r2 = routerSigningKey r1 == routerSigningKey r2
-  --
-  isSameAddr (IP4 x) r = x == routerIPv4Address r
-  isSameAddr (IP6 x) r = x `elem` map fst (routerAlternateORAddresses r)
+
+meetsRestrictions :: RouterDesc -> [RouterRestriction] -> Bool
+meetsRestrictions _   []       = True
+meetsRestrictions rtr (r:rest) =
+  case r of
+    IsStable | "Stable" `elem` routerStatus rtr  -> meetsRestrictions rtr rest
+             | otherwise                         -> False
+    NotRouter rdesc | rtr == rdesc               -> False
+                    | otherwise                  -> meetsRestrictions rtr rest
+    NotTorAddr taddr | isSameAddr taddr rtr      -> False
+                     | otherwise                 -> meetsRestrictions rtr rest
+    ExitNode | allowsExits (routerExitRules rtr) -> meetsRestrictions rtr rest
+             | otherwise                         -> False
+    ExitNodeAllowing a p
+          | allowsExit (routerExitRules rtr) a p -> meetsRestrictions rtr rest
+          | otherwise                            -> False
+ where 
+  isSameAddr (IP4 x) s = x == routerIPv4Address s
+  isSameAddr (IP6 x) s = x `elem` map fst (routerAlternateORAddresses s)
   isSameAddr _       _ = False
   --
   allowsExits (ExitRuleReject AddrSpecAll PortSpecAll : _) = False
   allowsExits _ = True
   --
   allowsExit [] _ _ = True -- "if no rule matches, the address wil be accepted"
-  allowsExit (ExitRuleAccept addrrule portrule : rest) addr port
+  allowsExit (ExitRuleAccept addrrule portrule : rrest) addr port
     | addrMatches addr addrrule && portMatches port portrule = True
-    | otherwise = allowsExit rest addr port
-  allowsExit (ExitRuleReject addrrule portrule : rest) addr port
+    | otherwise = allowsExit rrest addr port
+  allowsExit (ExitRuleReject addrrule portrule : rrest) addr port
     | addrMatches addr addrrule && portMatches port portrule = False
-    | otherwise = allowsExit rest addr port
+    | otherwise = allowsExit rrest addr port
   --
   portMatches _ PortSpecAll           = True
   portMatches p (PortSpecRange p1 p2) = (p >= p1) && (p <= p2)

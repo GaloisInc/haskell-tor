@@ -4,10 +4,14 @@ module Tor.DataFormat.TorCell(
        , DestroyReason(..), putDestroyReason, getDestroyReason
        , HandshakeType(..), putHandshakeType, getHandshakeType
        , TorCert(..),       putTorCert,       getTorCert
+       , getCircuit
+       , isPadding
        )
  where
 
+#if !MIN_VERSION_base(4,8,0)
 import Control.Applicative
+#endif
 import Control.Exception
 import Control.Monad
 import Data.Binary.Get
@@ -38,6 +42,27 @@ data TorCell = Padding
              | Authenticate       ByteString
              | Authorize
  deriving (Eq, Show)
+
+getCircuit :: TorCell -> Maybe Word32
+getCircuit x =
+  case x of
+    Create      circId _   -> Just circId
+    Created     circId _   -> Just circId
+    Relay       circId _   -> Just circId
+    Destroy     circId _   -> Just circId
+    CreateFast  circId _   -> Just circId
+    CreatedFast circId _ _ -> Just circId
+    RelayEarly  circId _   -> Just circId
+    Create2     circId _ _ -> Just circId
+    Created2    circId _   -> Just circId
+    _                      -> Nothing
+
+isPadding :: TorCell -> Bool
+isPadding x =
+  case x of
+    Padding    -> True
+    VPadding _ -> True
+    _          -> False
 
 getTorCell :: Get TorCell
 getTorCell =

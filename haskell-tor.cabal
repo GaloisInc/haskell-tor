@@ -19,13 +19,18 @@ Flag hans
 
 library
   default-language:   Haskell2010
-  ghc-options:        -Wall -threaded
+  default-extensions: CPP
+  other-extensions:   DeriveDataTypeable, ExistentialQuantification,
+                      FlexibleInstances, MultiWayIf, OverloadedStrings,
+                      RecordWildCards
+  ghc-options:        -Wall -Werror -threaded
   hs-source-dirs:     src
 
   build-depends:
                       array                      >= 0.5   && < 0.7,
                       asn1-encoding              >= 0.9   && < 0.11,
                       asn1-types                 >= 0.3   && < 0.5,
+                      async                      >= 2.0.2 && < 2.2,
                       attoparsec                 >= 0.13  && < 0.15,
                       base                       >= 4.7   && < 5.0,
                       base64-bytestring          >= 1.0   && < 1.2,
@@ -52,6 +57,7 @@ library
 
   exposed-modules:
                       Data.Hourglass.Now,
+                      Tor,
                       Tor.Circuit,
                       Tor.DataFormat.Consensus,
                       Tor.DataFormat.DefaultDirectory,
@@ -70,10 +76,11 @@ library
                       Tor.Options,
                       Tor.RouterDesc.Render,
                       Tor.RouterDesc,
+                      Tor.State.CircuitManager,
                       Tor.State.Credentials,
                       Tor.State.Directories,
-                      Tor.State.Routers,
-                      Tor.State
+                      Tor.State.LinkManager,
+                      Tor.State.Routers
 
   if flag(network)
     build-depends:    network                    >= 2.5   && < 2.7
@@ -86,6 +93,7 @@ executable haskell-tor
   main-is:            Main.hs
   default-language:   Haskell2010
   ghc-options:        -Wall -threaded
+  hs-source-dirs:     exe
   build-depends:
                       asn1-encoding              >= 0.8   && < 0.10,
                       asn1-types                 >= 0.2   && < 0.4,
@@ -106,8 +114,6 @@ executable haskell-tor
   if os(HaLVM)
     build-depends:    HALVMCore                  >= 2.0   && < 2.4,
                       XenDevice                  >= 2.0   && < 2.4
-  else
-    build-depends:    network                    >= 2.5   && < 2.7
 
 test-suite test-tor
   type:               exitcode-stdio-1.0

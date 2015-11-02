@@ -28,6 +28,8 @@ import Tor.DataFormat.Helpers(toString, ip4, ip6, char8, decimalNum)
 import Tor.DataFormat.TorAddress
 import Tor.DataFormat.TorCell
 
+-- FIXME: the stream id is only relevant for some of these items, and should
+-- probably be removed from the rest.
 data RelayCell =
     RelayBegin                 { relayStreamId       :: Word16
                                , relayBeginAddress   :: TorAddress
