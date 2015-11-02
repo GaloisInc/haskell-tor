@@ -19,7 +19,7 @@ module Tor.Circuit(
 
 import Control.Concurrent
 import Control.Exception
-import Control.Monad
+import Control.Monad(void, when, unless, forever, join)
 import Crypto.Cipher.AES
 import Crypto.Cipher.Types
 import Crypto.Error
@@ -35,6 +35,9 @@ import Data.ByteString(ByteString)
 import qualified Data.ByteString as S
 import qualified Data.ByteString.Lazy as L
 import Data.Either
+#if !MIN_VERSION_base(4,8,0)
+import Data.Foldable hiding (all)
+#endif
 import Data.IntSet(IntSet)
 import qualified Data.IntSet as IntSet
 import Data.Maybe
@@ -42,6 +45,9 @@ import Data.Map.Strict(Map)
 import qualified Data.Map.Strict as Map
 import Data.Tuple
 import Data.Word
+#if !MIN_VERSION_base(4,8,0)
+import Prelude hiding (mapM_)
+#endif
 import Tor.DataFormat.RelayCell
 import Tor.DataFormat.TorAddress
 import Tor.DataFormat.TorCell
@@ -122,9 +128,9 @@ destroyCircuit circ rsn =
             case state of
               Left _ -> return (state, [])
               Right threads ->
-                do mapM_ killSockets =<< readMVar (circSockets circ)
+                do mapM_ killSockets     =<< readMVar (circSockets circ)
                    mapM_ killConnWaiters =<< readMVar (circConnWaiters circ)
-                   mapM_ killResWaiters =<< readMVar (circResolveWaiters circ)
+                   mapM_ killResWaiters  =<< readMVar (circResolveWaiters circ)
                    -- FIXME: Send a message out, kill the crypto after
                    _ <- takeMVar (circForeCryptoData circ)
                    _ <- takeMVar (circBackCryptoData circ)

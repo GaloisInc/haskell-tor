@@ -1,6 +1,5 @@
 {-# LANGUAGE CPP              #-}
 {-# LANGUAGE RecordWildCards  #-}
-import Control.Concurrent(forkIO)
 import Data.ByteString.Char8(ByteString,pack)
 import qualified Data.ByteString.Lazy as L
 import Tor
@@ -36,8 +35,7 @@ main = runDefaultMain $ \ flags ->
                           }
                      }
      tor <- startTor ns options
-     -- addrs <- torResolveName tor "www.whatismypublicip.com"
-     let addrs = [(IP4 "108.160.151.39", 60)]
+     addrs <- torResolveName tor "www.whatismypublicip.com"
      case addrs of
        [] ->
          putStrLn ("Could not resolve www.whatismypublicip.com!")
@@ -116,12 +114,3 @@ generateLogger ((OutputLog fp):_) = do h <- openFile fp AppendMode
                                        return (makeLogger (hPutStrLn h))
 generateLogger (_:rest)           = generateLogger rest
 #endif
-
--- -----------------------------------------------------------------------------
-
-throwLeft :: Either String b -> IO b
-throwLeft (Left s)  = fail s
-throwLeft (Right x) = return x
-
-forkIO_ :: IO () -> IO ()
-forkIO_ m = forkIO m >> return ()

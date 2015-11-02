@@ -17,7 +17,10 @@ import Data.ByteString(ByteString)
 import Data.ByteString.Char8(pack)
 import Data.Either
 import Data.Hourglass
-import Data.List hiding (uncons)
+import Data.List
+#if MIN_VERSION_base(4,8,0)
+                  hiding (uncons)
+#endif
 import Data.Maybe
 import Data.Word
 import Tor.DataFormat.Consensus

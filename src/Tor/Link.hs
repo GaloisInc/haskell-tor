@@ -12,6 +12,9 @@ module Tor.Link(
        )
  where
 
+#if !MIN_VERSION_base(4,8,0)
+import Control.Applicative
+#endif
 import Control.Concurrent
 import Control.Exception
 import Control.Monad
@@ -35,6 +38,9 @@ import Data.Hourglass.Now
 import Data.IORef
 import Data.Map.Strict(Map)
 import qualified Data.Map.Strict as Map
+#if !MIN_VERSION_base(4,8,0)
+import Data.Monoid
+#endif
 import qualified Data.Serialize.Get as Cereal
 import Data.Tuple(swap)
 import Data.Word

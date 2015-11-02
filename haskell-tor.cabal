@@ -19,6 +19,10 @@ Flag hans
 
 library
   default-language:   Haskell2010
+  default-extensions: CPP
+  other-extensions:   DeriveDataTypeable, ExistentialQuantification,
+                      FlexibleInstances, MultiWayIf, OverloadedStrings,
+                      RecordWildCards
   ghc-options:        -Wall -Werror -threaded
   hs-source-dirs:     src
 

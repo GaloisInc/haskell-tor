@@ -9,6 +9,10 @@ module Tor.State.Routers(
        )
  where
 
+#if !MIN_VERSION_base(4,8,0)
+import Control.Applicative
+import Data.Foldable(find)
+#endif
 import Control.Concurrent
 import Control.Monad
 import Crypto.Hash.Easy
@@ -22,6 +26,9 @@ import Data.ByteString(ByteString,unpack)
 import Data.Hourglass
 import Data.Hourglass.Now
 import Data.List
+#if !MIN_VERSION_base(4,8,0)
+    hiding (find)
+#endif
 import qualified Data.Map.Strict as Map
 import Data.Maybe
 import Data.Word
