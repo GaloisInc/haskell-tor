@@ -11,6 +11,7 @@ import Control.Concurrent.Async(Async,async,wait,waitCatch)
 import Control.Exception
 import Control.Monad
 import Crypto.Random
+import Data.X509
 import Network.TLS(HasBackend)
 import System.Mem.Weak
 import Tor.Circuit
@@ -18,6 +19,7 @@ import Tor.DataFormat.TorCell
 import Tor.Options
 import Tor.RNG
 import Tor.RouterDesc
+import Tor.State.Credentials
 import Tor.State.LinkManager
 import Tor.State.Routers
 
@@ -33,18 +35,23 @@ data HasBackend s => CircuitManager ls s
          }
 
 data CircuitEntry = Pending {
-                      ceExitNode        :: RouterDesc
+                      ceExitNode         :: RouterDesc
                     , _cePendingEntrance :: Async TorCircuit
                     }
                   | Entry {
-                      ceExitNode        :: RouterDesc
+                      ceExitNode         :: RouterDesc
                     , _ceWeakEntrance    :: Weak TorCircuit
                     }
+--                   | Exit {
+--                       _ceIncomingLink    :: Weak TorLink
+--                     , _ceCircuit         :: Weak TorCircuit
+--                     }
 
 newCircuitManager :: HasBackend s =>
-                     TorOptions -> RouterDB -> LinkManager ls s ->
+                     TorOptions ->
+                     Credentials -> RouterDB -> LinkManager ls s ->
                      IO (CircuitManager ls s)
-newCircuitManager opts rdb lm =
+newCircuitManager opts creds rdb lm =
   case torEntranceOptions opts of
     Nothing      -> return NoCircuitManager
     Just entOpts ->
@@ -54,8 +61,10 @@ newCircuitManager opts rdb lm =
          let cm = CircuitManager circLen rdb (torLog opts) lm rngMV circMV
          setIncomingLinkHandler lm $ \ link ->
            handle logException $
-             do _circuit <- acceptCircuit link
+             do (_, PrivKeyRSA priv) <- getOnionKey creds
+                circuit <- acceptCircuit (torLog opts) priv link rngMV
                 torLog opts ("HANDLE INCOMING CIRCUIT FIXME")
+                undefined circuit
          return cm
  where
   logException e = torLog opts ("Exception creating incoming circuit: " ++

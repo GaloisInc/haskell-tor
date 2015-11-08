@@ -1,19 +1,28 @@
 {-# LANGUAGE RecordWildCards #-}
 module Tor.Circuit(
+       -- * High-level type for Tor circuits, and operations upon them.
          TorCircuit
        , createCircuit
        , acceptCircuit
        , destroyCircuit
        , extendCircuit
-       --
+       -- * Name resolution support.
        , resolveName
-       --
+       -- * Tor sockets.
        , TorSocket(..)
        , connectToHost
        , connectToHost'
        , torRead
        , torWrite
        , torClose
+       -- * Miscellaneous routines, mostly exported for testing.
+       , startTAPHandshake
+       , advanceTAPHandshake
+       , completeTAPHandshake
+       , startNTorHandshake
+       , advanceNTorHandshake
+       , completeNTorHandshake
+       , generate25519
        )
  where
 
@@ -25,14 +34,19 @@ import Crypto.Cipher.Types
 import Crypto.Error
 import Crypto.Hash hiding (hash)
 import Crypto.Hash.Easy
+import Crypto.MAC.HMAC(hmac,HMAC)
 import Crypto.Number.Serialize
+import Crypto.PubKey.Curve25519 as Curve
 import Crypto.PubKey.DH
 import Crypto.PubKey.RSA.KeyHash
+import Crypto.PubKey.RSA.Types
 import Crypto.Random
 import Data.Binary.Get
 import Data.Bits
+import Data.ByteArray(ByteArrayAccess,ByteArray,convert)
 import Data.ByteString(ByteString)
 import qualified Data.ByteString as S
+import qualified Data.ByteString.Char8 as S8
 import qualified Data.ByteString.Lazy as L
 import Data.Either
 #if !MIN_VERSION_base(4,8,0)
@@ -45,6 +59,7 @@ import Data.Map.Strict(Map)
 import qualified Data.Map.Strict as Map
 import Data.Tuple
 import Data.Word
+import Hexdump
 #if !MIN_VERSION_base(4,8,0)
 import Prelude hiding (mapM_)
 #endif
@@ -59,67 +74,129 @@ import Tor.RouterDesc
 
 -- -----------------------------------------------------------------------------
 
-data TorCircuit = TorCircuit {
-       circForwardLink     :: Maybe TorLink
-     , circLog             :: String -> IO ()
-     , circId              :: Word32
-     , circRNG             :: MVar TorRNG
-     , circState           :: MVar (Either DestroyReason [ThreadId])
-     , circTakenStreamIds  :: MVar IntSet
-     , circExtendWaiter    :: MVar RelayCell
-     , circResolveWaiters  :: MVar (Map Word16 (MVar [(TorAddress, Word32)]))
-     , circSockets         :: MVar (Map Word16 TorSocket)
-     , circConnWaiters     :: MVar (Map Word16 (MVar (Either String TorSocket)))
-     , circForeCryptoData  :: MVar [(EncryptionState, Context SHA1)]
-     , circBackCryptoData  :: MVar [(EncryptionState, Context SHA1)]
-     }
+data TorCircuit =
+       OriginatedTorCircuit {
+         circLink            :: TorLink
+       , circLog             :: String -> IO ()
+       , circId              :: Word32
+       , circRNG             :: MVar TorRNG
+       , circState           :: MVar (Either DestroyReason [ThreadId])
+       , circTakenStreamIds  :: MVar IntSet
+       , circExtendWaiter    :: MVar RelayCell
+       , circResolveWaiters  :: MVar (Map Word16 (MVar [(TorAddress, Word32)]))
+       , circSockets         :: MVar (Map Word16 TorSocket)
+       , circConnWaiters     :: MVar (Map Word16 (MVar (Either String TorSocket)))
+       , circForeCryptoData  :: MVar [(EncryptionState, Context SHA1)]
+       , circBackCryptoData  :: MVar [(EncryptionState, Context SHA1)]
+       }
+     | TransverseTorCircuit {
+         circLink            :: TorLink
+       , circLog             :: String -> IO ()
+       , circId              :: Word32
+       , circRNG             :: MVar TorRNG
+       , circForeCryptoData  :: MVar [(EncryptionState, Context SHA1)]
+       , circBackCryptoData  :: MVar [(EncryptionState, Context SHA1)]
+       }
 
 createCircuit :: MVar TorRNG -> (String -> IO ()) ->
                  TorLink -> RouterDesc -> Word32 ->
                  IO TorCircuit
-createCircuit circRNG circLog link firstRouter circId =
-  do x <- modifyMVar circRNG (return . generateLocal')
-     let PublicNumber gx = calculatePublic oakley2 x
-         gxBS = i2ospOf_ 128 gx
-     let nodePub = routerOnionKey firstRouter
-     egx <- hybridEncrypt True nodePub gxBS
-     linkWrite link (Create circId egx)
-     createResp <- linkRead link circId
-     case createResp of
-       Created cid bstr                       -- DH_LEN + HASH_LEN
-         | (circId == cid) && (S.length bstr == (128    + 20)) ->
-            case completeTAPHandshake x bstr of
-              Left err ->
-                failLog ("CREATE handshake failed: " ++ err)
-              Right (fencstate, bencstate) ->
-                do circForeCryptoData <- newMVar [fencstate]
-                   circBackCryptoData <- newMVar [bencstate]
-                   circState          <- newEmptyMVar
-                   circTakenStreamIds <- newMVar IntSet.empty
-                   circExtendWaiter   <- newEmptyMVar
-                   circSockets        <- newMVar Map.empty
-                   circResolveWaiters <- newMVar Map.empty
-                   circConnWaiters    <- newMVar Map.empty
-                   let circForwardLink = Just link
-                   let circ = TorCircuit { .. }
-                   handler <- forkIO (runBackward circ)
-                   putMVar circState (Right [handler])
-                   circLog ("Created circuit " ++ show circId)
-                   return circ
-         | otherwise ->
-             failLog ("Got CREATED message with bad length")
-       Destroy _ reason ->
-         failLog ("Target circuit entrance refused handshake: " ++ show reason)
-       _ ->
-         failLog ("Unacceptable response to CREATE message.")
+createCircuit circRNG circLog circLink router1 circId =
+  case routerNTorOnionKey router1 of
+    Nothing ->
+      do (x,cbstr) <- modifyMVar circRNG (return . startTAPHandshake router1)
+         linkWrite circLink (Create circId cbstr)
+         createResp <- linkRead circLink circId
+         case createResp of
+           Created cid bstr                       -- DH_LEN + HASH_LEN
+             | (circId == cid) && (S.length bstr == (128    + 20)) ->
+                case completeTAPHandshake x bstr of
+                  Left err ->
+                    failLog ("CREATE handshake failed: " ++ err)
+                  Right (fencstate, bencstate) ->
+                    do circForeCryptoData <- newMVar [fencstate]
+                       circBackCryptoData <- newMVar [bencstate]
+                       circState          <- newEmptyMVar
+                       circTakenStreamIds <- newMVar IntSet.empty
+                       circExtendWaiter   <- newEmptyMVar
+                       circSockets        <- newMVar Map.empty
+                       circResolveWaiters <- newMVar Map.empty
+                       circConnWaiters    <- newMVar Map.empty
+                       let circ = OriginatedTorCircuit { .. }
+                       handler <- forkIO (runBackward circ)
+                       putMVar circState (Right [handler])
+                       circLog ("Created circuit " ++ show circId)
+                       return circ
+             | otherwise ->
+                 failLog ("Got CREATED message with bad length")
+           Destroy _ reason ->
+             failLog ("Target circuit entrance refused handshake: " ++ show reason)
+           _ ->
+             failLog ("Unacceptable response to CREATE message.")
+    Just _ ->
+      do res <- modifyMVar circRNG (return . startNTorHandshake router1)
+         case res of
+           Nothing ->
+             failLog ("Couldn't generate initial NTor handshake message.")
+           Just (pair, cbody) ->
+             do linkWrite circLink (Create2 circId NTor cbody)
+                createResp <- linkRead circLink circId
+                case createResp of
+                  Created2 cid bstr                     -- G_LENGTH + H_LENGTH
+                    | (circId == cid) && (S.length bstr == (32      + 32)) ->
+                       case completeNTorHandshake router1 pair bstr of
+                         Left err ->
+                           failLog ("CREATE2 handshake failed: " ++ err)
+                         Right (fencstate, bencstate) ->
+                           do circForeCryptoData <- newMVar [fencstate]
+                              circBackCryptoData <- newMVar [bencstate]
+                              circState          <- newEmptyMVar
+                              circTakenStreamIds <- newMVar IntSet.empty
+                              circExtendWaiter   <- newEmptyMVar
+                              circSockets        <- newMVar Map.empty
+                              circResolveWaiters <- newMVar Map.empty
+                              circConnWaiters    <- newMVar Map.empty
+                              let circ = OriginatedTorCircuit { .. }
+                              handler <- forkIO (runBackward circ)
+                              putMVar circState (Right [handler])
+                              circLog ("Created circuit (ntor) " ++ show circId)
+                              return circ
+                    | otherwise ->
+                        failLog ("Got CREATED2 message with bad length")
+                  Destroy _ reason ->
+                    failLog ("Target entrance (ntor) refused handshake: "
+                             ++ show reason)
+                  _ ->
+                    failLog ("Unacceptable response to CREATE2 message.")
+
  where
   failLog str = circLog str >> throwIO (userError str)
   runBackward circ =
-    forever $ do next <- linkRead link circId
+    forever $ do next <- linkRead circLink circId
                  processBackwardInput circ next
 
-acceptCircuit :: TorLink -> IO TorCircuit
-acceptCircuit = error "acceptCircuit" -- FIXME
+acceptCircuit :: (String -> IO ()) -> PrivateKey ->
+                 TorLink -> MVar TorRNG ->
+                 IO TorCircuit
+acceptCircuit circLog priv circLink circRNG =
+  do msg <- linkRead circLink 0
+     case msg of
+       Create circId bstr ->
+         do (created, fes, bes) <- modifyMVar circRNG
+                                    (return . advanceTAPHandshake priv circId bstr)
+            circForeCryptoData <- newMVar [fes]
+            circBackCryptoData <- newMVar [bes]
+            let circ            = TransverseTorCircuit { .. }
+            linkWrite circLink created
+            circLog ("Created transverse circuit " ++ show circId)
+            return circ
+       CreateFast _circId _bstr ->
+         undefined
+       Create2 _circId _hsType _bstr ->
+         undefined
+       _ ->
+         undefined
+
 
 -- |Destroy a circuit, and all the streams and computations running through it.
 destroyCircuit :: TorCircuit -> DestroyReason -> IO ()
@@ -151,11 +228,9 @@ extendCircuit circ nextRouter =
   do state <- readMVar (circState circ)
      when (isLeft state) $
        throwIO (userError ("Attempted to extend a closed circuit."))
-     x <- modifyMVar (circRNG circ) (return . generateLocal')
-     let PublicNumber gx = calculatePublic oakley2 x
-         gxBS = i2ospOf_ 128 gx
-     egx <- hybridEncrypt True (routerOnionKey nextRouter) gxBS
-     writeCellOnCircuit circ (extendCell egx)
+     (x, ebstr) <- modifyMVar (circRNG circ)
+                     (return . startTAPHandshake nextRouter)
+     writeCellOnCircuit circ (extendCell ebstr)
      res <- takeMVar (circExtendWaiter circ)
      case res of
        RelayExtended{} ->
@@ -185,14 +260,10 @@ extendCircuit circ nextRouter =
 
 writeCellOnCircuit :: TorCircuit -> RelayCell -> IO ()
 writeCellOnCircuit circ relay =
-  case circForwardLink circ of
-    Nothing ->
-      throwIO (userError "Attempt to write cell on circuit w/o forward link.")
-    Just link ->
-      do keysnhashes <- takeMVar (circForeCryptoData circ)
-         let (cell, keysnhashes') = synthesizeRelay keysnhashes
-         linkWrite link (pickBuilder relay (circId circ) cell)
-         putMVar (circForeCryptoData circ) keysnhashes'
+  do keysnhashes <- takeMVar (circForeCryptoData circ)
+     let (cell, keysnhashes') = synthesizeRelay keysnhashes
+     linkWrite (circLink circ) (pickBuilder relay (circId circ) cell)
+     putMVar (circForeCryptoData circ) keysnhashes'
  where
   synthesizeRelay [] = error "synthesizeRelay reached empty list?!"
   synthesizeRelay [(estate, hash)] =
@@ -436,6 +507,12 @@ torClose sock reason =
 
 newtype EncryptionState = ES L.ByteString
 
+instance Eq EncryptionState where
+  (ES a) == (ES b) = (L.take 256 a) == (L.take 256 b)
+
+instance Show EncryptionState where
+  show (ES x) = "EncryptionState(" ++ simpleHex (L.toStrict (L.take 8 x)) ++ " ...)"
+
 initEncryptionState :: AES128 -> EncryptionState
 initEncryptionState k = ES (xorStream k)
 
@@ -476,8 +553,31 @@ getNextStreamId circ =
   toWord16 bs = fromIntegral (S.index bs 0) `shiftL` 8 +
                 fromIntegral (S.index bs 1)
 
-generateLocal' :: TorRNG -> (TorRNG, PrivateNumber)
-generateLocal' g = swap (withDRG g (generatePrivate oakley2))
+-- -----------------------------------------------------------------------------
+
+startTAPHandshake :: RouterDesc -> TorRNG ->
+                     (TorRNG, (PrivateNumber, ByteString))
+startTAPHandshake rtr g = (g'', (x, egx))
+ where
+  (x, g')         = withDRG g (generatePrivate oakley2)
+  PublicNumber gx = calculatePublic oakley2 x
+  gxBS            = i2ospOf_ 128 gx
+  nodePub         = routerOnionKey rtr
+  (egx, g'')      = withDRG g' (hybridEncrypt True nodePub gxBS)
+
+advanceTAPHandshake :: PrivateKey -> Word32 -> ByteString -> TorRNG ->
+                       (TorRNG, (TorCell,
+                                 (EncryptionState, Context SHA1),
+                                 (EncryptionState, Context SHA1)))
+advanceTAPHandshake privkey circId egx g = (g'', (created, f, b))
+ where
+  (y, g')         = withDRG g (generatePrivate oakley2)
+  PublicNumber gy = calculatePublic oakley2 y
+  gyBS            = i2ospOf_ 128 gy
+  (gxBS, g'')     = withDRG g' (hybridDecrypt privkey egx)
+  gx              = PublicNumber (os2ip gxBS)
+  (kh, f, b)      = computeTAPValues y gx
+  created         = Created circId (gyBS `S.append` kh)
 
 completeTAPHandshake :: PrivateNumber -> ByteString ->
                         Either String ((EncryptionState, Context SHA1),
@@ -493,24 +593,152 @@ completeTAPHandshake x rbstr
 computeTAPValues :: PrivateNumber -> PublicNumber ->
                     (ByteString, (EncryptionState, Context SHA1),
                                  (EncryptionState, Context SHA1))
-computeTAPValues b ga = (kh, (encsf, fhash), (encsb, bhash))
+computeTAPValues b ga = (L.toStrict kh, (encsf, fhash), (encsb, bhash))
  where
   SharedKey k0 = getShared oakley2 b ga
-  (kh, rest1)  = S.splitAt 20 (kdfTor (i2ospOf_ 128 k0))
-  (df,  rest2) = S.splitAt 20  rest1
-  (db,  rest3) = S.splitAt 20  rest2
-  (kf,  rest4) = S.splitAt 16  rest3
-  (kb,  _)     = S.splitAt 16  rest4
-  keyf         = throwCryptoError (cipherInit kf)
-  keyb         = throwCryptoError (cipherInit kb)
+  (kh, rest1)  = L.splitAt 20 (kdfTor (i2ospOf_ 128 k0))
+  (df,  rest2) = L.splitAt 20  rest1
+  (db,  rest3) = L.splitAt 20  rest2
+  (kf,  rest4) = L.splitAt 16  rest3
+  (kb,  _)     = L.splitAt 16  rest4
+  keyf         = throwCryptoError (cipherInit (L.toStrict kf))
+  keyb         = throwCryptoError (cipherInit (L.toStrict kb))
   encsf        = initEncryptionState keyf
   encsb        = initEncryptionState keyb
-  fhash        = hashUpdate hashInit df
-  bhash        = hashUpdate hashInit db
+  fhash        = hashUpdate hashInit (L.toStrict df)
+  bhash        = hashUpdate hashInit (L.toStrict db)
 
-kdfTor :: ByteString -> ByteString
-kdfTor k0 = S.concat (map kdfTorChunk [0..255])
+kdfTor :: ByteString -> L.ByteString
+kdfTor k0 = L.fromChunks (map kdfTorChunk [0..255])
   where kdfTorChunk x = sha1 (S.snoc k0 x)
+
+-- -----------------------------------------------------------------------------
+
+startNTorHandshake :: RouterDesc -> TorRNG ->
+                     (TorRNG, Maybe (Curve25519Pair, ByteString))
+startNTorHandshake router g0 =
+  case routerNTorOnionKey router of
+    Nothing ->
+      (g0, Nothing)
+    Just keyid ->
+      let (pair@(bigX, _), g1) = withDRG g0 generate25519
+          nodeid = routerFingerprint router
+          client_pk = convert bigX
+          bstr = S.concat [nodeid, keyid, client_pk]
+      in (g1, Just (pair, bstr))
+
+advanceNTorHandshake :: RouterDesc -> Curve.SecretKey ->
+                        ByteString -> TorRNG ->
+                        (TorRNG, Either String (ByteString,
+                                                (EncryptionState, Context SHA1),
+                                                (EncryptionState, Context SHA1)))
+advanceNTorHandshake me littleB bstr0 g0
+  | Nothing <- routerNTorOnionKey me =
+      (g0, Left "Called advance, but I don't support NTor handshakes.")
+  | (nodeid /= routerFingerprint me) || (Just keyid /= routerNTorOnionKey me) =
+      (g0, Left "Called advance, but their fingerprint doesn't match me.")
+  | Left err <- publicKey keyid =
+      (g0, Left ("Couldn't decode bigB in advance: " ++ err))
+  | Left err <- publicKey keyid =
+      (g0, Left ("Couldn't decode bigX in advance: " ++ err))
+  | otherwise = (g1, Right (outdata,fenc,benc))
+ where
+  (nodeid, bstr1)       = S.splitAt 20 bstr0
+  (keyid,  xpub)        = S.splitAt 32 bstr1
+  Right bigB            = publicKey keyid
+  Right bigX            = publicKey xpub
+  ((bigY, littleY), g1) = withDRG g0 generate25519
+  secret_input          = S.concat [curveExp bigX littleY,
+                                    curveExp bigX littleB,
+                                    nodeid, convert bigB, convert bigX,
+                                    convert bigY, protoid]
+  key_seed              = hmacSha256 secret_input t_key
+  verify                = hmacSha256 t_verify secret_input
+  auth_input            = S.concat [verify, nodeid, convert bigB, convert bigY,
+                                    convert bigX, protoid, S8.pack "Server"]
+  server_pk             = convert bigY
+  auth                  = hmacSha256 t_mac auth_input
+  --
+  outdata               = S.concat [server_pk, auth]
+  (fenc, benc)          = computeNTorValues key_seed
+
+completeNTorHandshake :: RouterDesc -> Curve25519Pair -> ByteString ->
+                         Either String ((EncryptionState, Context SHA1),
+                                        (EncryptionState, Context SHA1))
+completeNTorHandshake router (bigX, littleX) bstr
+  | Nothing <- routerNTorOnionKey router = Left "Internal error complete/ntor"
+  | Left err <- publicKey public_pk      = Left ("Couldn't decode bigY: "++err)
+  | Left err <- publicKey server_ntorid  = Left ("Couldn't decode bigB: "++err)
+  | auth /= auth'                        = Left ("Authorization codes don't match: " ++ simpleHex auth ++ " versus " ++ simpleHex auth')
+  | otherwise                            = Right res
+ where
+  nodeid             = routerFingerprint router
+  (public_pk, auth)  = S.splitAt 32 bstr
+  Just server_ntorid = routerNTorOnionKey router
+  Right bigY         = publicKey public_pk
+  Right bigB         = publicKey server_ntorid
+  secret_input       = S.concat [curveExp bigY littleX, curveExp bigB littleX,
+                                 nodeid, convert bigB, convert bigX, convert bigY,
+                                 protoid]
+  key_seed           = hmacSha256 secret_input t_key
+  verify             = hmacSha256 t_verify secret_input
+  auth_input         = S.concat [verify, nodeid, convert bigB, convert bigY,
+                                 convert bigX, protoid, S8.pack "Server"]
+  auth'              = hmacSha256 t_mac auth_input
+  res                = computeNTorValues key_seed
+
+curveExp :: Curve.PublicKey -> Curve.SecretKey -> ByteString
+curveExp a b = convert (dh a b)
+
+type Curve25519Pair = (Curve.PublicKey, Curve.SecretKey)
+
+generate25519 :: MonadRandom m => m Curve25519Pair
+generate25519 =
+  do bytes <- getRandomBytes 32
+     case secretKey (bytes :: ByteString) of
+       Left err ->
+         fail ("Couldn't convert to a secret key: " ++ show err)
+       Right privKey ->
+         do let pubKey = toPublic privKey
+            return (pubKey, privKey)
+
+computeNTorValues :: ByteString -> ((EncryptionState, Context SHA1),
+                                    (EncryptionState, Context SHA1))
+computeNTorValues key_seed = ((encsf, fhash), (encsb, bhash))
+ where
+  bstr0       = kdfRFC5869 key_seed
+  (df, bstr1) = L.splitAt 20 bstr0
+  (db, bstr2) = L.splitAt 20 bstr1
+  (kf, bstr3) = L.splitAt 16 bstr2
+  (kb, _    ) = L.splitAt 16 bstr3
+  -- FIXME: We should take a final DIGEST_LEN bytes here "for use in the
+  -- place of KH in the hidden service protocol."
+  keyf         = throwCryptoError (cipherInit (L.toStrict kf))
+  keyb         = throwCryptoError (cipherInit (L.toStrict kb))
+  encsf        = initEncryptionState keyf
+  encsb        = initEncryptionState keyb
+  fhash        = hashUpdate hashInit (L.toStrict df)
+  bhash        = hashUpdate hashInit (L.toStrict db)
+
+kdfRFC5869 :: ByteString -> L.ByteString
+kdfRFC5869 kseed = L.fromChunks (map kn [1..250])
+ where
+  kn i
+   | i  < 1    = error "Internal error, kdfRFC5859"
+   | i == 1    = hmacSha256 (m_expand `S.snoc` 1) kseed
+   | otherwise = hmacSha256 (S.concat [kn (i-1),m_expand,S.singleton i]) kseed
+
+hmacSha256 :: (ByteArrayAccess key, ByteArray message, ByteArray res) =>
+              key -> message -> res
+hmacSha256 k m = convert res
+ where res = hmac k m :: HMAC SHA256
+
+protoid, t_mac, t_key, t_verify, m_expand :: ByteString
+protoid               = S8.pack "ntor-curve25519-sha256-1"
+t_mac                 = protoid `S.append` S8.pack ":mac"
+t_key                 = protoid `S.append` S8.pack ":key_extract"
+t_verify              = protoid `S.append` S8.pack ":verify"
+m_expand              = protoid `S.append` S8.pack ":key_expand"
 
 -- -- -----------------------------------------------------------------------------
 -- 

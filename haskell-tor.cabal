@@ -74,6 +74,7 @@ library
                       Tor.NetworkStack.Fetch,
                       Tor.NetworkStack,
                       Tor.Options,
+                      Tor.RNG,
                       Tor.RouterDesc.Render,
                       Tor.RouterDesc,
                       Tor.State.CircuitManager,
@@ -121,6 +122,7 @@ test-suite test-tor
   ghc-options:        -Wall
   hs-source-dirs:     test
   default-language:   Haskell2010
+  other-extensions:   FlexibleInstances, TypeSynonymInstances
   ghc-options:        -fno-warn-orphans
   build-depends:
                       asn1-types                 >= 0.2   && < 0.4,
@@ -133,6 +135,7 @@ test-suite test-tor
                       HUnit                      >= 1.2   && < 1.4,
                       QuickCheck                 >= 2.7   && < 2.9,
                       memory                     >= 0.7   && < 0.9,
+                      pretty-hex                 >= 1.0   && < 1.4,
                       test-framework             >= 0.8   && < 0.10,
                       test-framework-hunit       >= 0.3   && < 0.5,
                       test-framework-quickcheck2 >= 0.3   && < 0.5,

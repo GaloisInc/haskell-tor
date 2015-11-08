@@ -45,7 +45,7 @@ startTor ns o =
      dirDB    <- newDirectoryDatabase ns (torLog o)
      routerDB <- newRouterDatabase ns dirDB (torLog o)
      lm       <- newLinkManager o ns routerDB creds
-     cm       <- newCircuitManager o routerDB lm
+     cm       <- newCircuitManager o creds routerDB lm
      when (not isRelay && isExit) $
        do torLog o "WARNING: Requested exit without relay support: weird."
           torLog o "WARNING: Please check that this is really what you want."

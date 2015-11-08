@@ -182,12 +182,9 @@ runLink llog rChansMV context initialBS =
   process x =
     case x of
       -- Section #1: Requests to create new circuits.
-      Create _circId _bstr  ->
-        llog ("Received CREATE on link.") -- FIXME
-      CreateFast _circId _bstr ->
-        llog ("Received CREATEFAST on link.") -- FIXME
-      Create2 _circId _htype _bstr ->
-        llog ("Received CREATE2 on link.") -- FIXME
+      Create     _ _   -> sendUpProtocol 0 x
+      CreateFast _ _   -> sendUpProtocol 0 x
+      Create2    _ _ _ -> sendUpProtocol 0 x
       -- Section #2: Responses to us, or relay packets, to be passed
       -- on to a higher layer.
       Created     circId _   -> sendUpProtocol circId x
@@ -583,7 +580,8 @@ acceptLink creds routerDB rngMV myAddrsMV llog sock who =
            unless res $
              fail "Signature verification failure in AUTHENITCATE cell."
            --
-           bufCh <- newMVar Map.empty
+           controlChan <- newChan
+           bufCh <- newMVar (Map.singleton 0 controlChan)
            thr   <- forkIO (runLink llog bufCh tls [leftOver])
            desc  <- findRouter routerDB cid
            llog ("Incoming link created from " ++ show who)
