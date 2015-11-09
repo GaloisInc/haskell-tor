@@ -63,7 +63,7 @@ data RelayCell =
   | RelayBeginDir              { relayStreamId       :: Word16 }
   | RelayExtend2               { relayStreamId       :: Word16
                                , relayExtendTarget   :: [ExtendSpec]
-                               , relayExtendType     :: Word16
+                               , relayExtendType     :: HandshakeType
                                , relayExtendData     :: ByteString }
   | RelayExtended2             { relayStreamId       :: Word16
                                , relayExtendedData   :: ByteString }
@@ -164,7 +164,7 @@ getRelayCell =
        13 -> return (digest, RelayBeginDir strmId)
        14 -> do nspec <- getWord8
                 specs <- replicateM (fromIntegral nspec) getExtendSpec
-                htype <- getWord16be
+                htype <- getHandshakeType
                 hlen  <- getWord16be
                 hdata <- getByteString (fromIntegral hlen)
                 return (digest, RelayExtend2 strmId specs htype hdata)
@@ -305,7 +305,7 @@ putRelayCellGuts   RelayBeginDir{} =
 putRelayCellGuts x@RelayExtend2{} =
   do putWord8 (fromIntegral (length (relayExtendTarget x)))
      forM_ (relayExtendTarget x) putExtendSpec
-     putWord16be (relayExtendType x)
+     putHandshakeType (relayExtendType x)
      putWord16be (fromIntegral (BS.length (relayExtendData x)))
      putByteString     (relayExtendData x)
      return 14
