@@ -621,7 +621,7 @@ advanceNTorHandshake me littleB bstr0 g0
                                     curveExp bigX littleB,
                                     nodeid, convert bigB, convert bigX,
                                     convert bigY, protoid]
-  key_seed              = hmacSha256 secret_input t_key
+  key_seed              = hmacSha256 t_key secret_input
   verify                = hmacSha256 t_verify secret_input
   auth_input            = S.concat [verify, nodeid, convert bigB, convert bigY,
                                     convert bigX, protoid, S8.pack "Server"]
