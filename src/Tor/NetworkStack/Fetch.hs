@@ -4,6 +4,7 @@ module Tor.NetworkStack.Fetch(
          FetchItem(..)
        , Fetchable
        , fetch
+       , readResponse
        )
  where
 

@@ -2,6 +2,7 @@ module Tor.State.Directories(
          Directory(..)
        , DirectoryDB
        , newDirectoryDatabase
+       , sendRouterDescription
        , getRandomDirectory
        , findDirectory
        , addDirectory
@@ -12,15 +13,13 @@ import Control.Concurrent
 import Crypto.PubKey.RSA
 import Crypto.Random
 import Control.Monad
-import Data.ByteString(uncons)
+import qualified Data.ByteString as S
 import Data.ByteString(ByteString)
 import Data.ByteString.Char8(pack)
+import qualified Data.ByteString.Lazy as L
 import Data.Either
 import Data.Hourglass
 import Data.List
-#if MIN_VERSION_base(4,8,0)
-                  hiding (uncons)
-#endif
 import Data.Maybe
 import Data.Word
 import Tor.DataFormat.Consensus
@@ -28,6 +27,8 @@ import Tor.DataFormat.DefaultDirectory
 import Tor.DataFormat.DirCertInfo
 import Tor.NetworkStack
 import Tor.NetworkStack.Fetch
+import Tor.RouterDesc
+import Tor.RouterDesc.Render
 
 data Directory = Directory {
        dirNickname    :: String
@@ -84,11 +85,39 @@ newDirectoryDatabase ns logMsg =
              " default directories loaded.")
      DDB `fmap` newMVar loadedDirs
 
+sendRouterDescription :: TorNetworkStack ls s -> (String -> IO ()) ->
+                         DirectoryDB ->
+                         RouterDesc -> PrivateKey ->
+                         IO ()
+sendRouterDescription ns out (DDB dirlsMV) desc pkey =
+  do dirls <- readMVar dirlsMV
+     forM_ dirls $ \ dir ->
+       do msock <- connect ns (dirAddress dir) (dirDirPort dir)
+          case msock of
+            Nothing ->
+              out "Could not connect to directory server for desc push."
+            Just sock ->
+              do let body = pack (renderRouterDesc desc pkey)
+                     header = pack (buildPost body)
+                 write ns sock (L.fromStrict header)
+                 write ns sock (L.fromStrict body)
+                 resp <- readResponse ns sock
+                 close ns sock
+                 case resp of
+                   Left err ->
+                     out ("Error posting descriptor: " ++ show err)
+                   Right _ ->
+                     out ("Posted descriptor to " ++ show (dirNickname dir))
+ where
+  buildPost bstr =
+    "POST /tor/ HTTP/1.0\r\n" ++
+    "Content-Length: " ++ show (S.length bstr) ++ "\r\n\r\n"
+
 getRandomDirectory :: DRG g => g -> DirectoryDB -> IO (Directory, g)
 getRandomDirectory g ddb@(DDB dirlsMV) =
   do ls <- readMVar dirlsMV
      let (bstr, g') = randomBytesGenerate 1 g
-     case uncons bstr of
+     case S.uncons bstr of
        Nothing -> 
          do threadDelay 1000000
             getRandomDirectory g ddb

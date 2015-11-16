@@ -742,7 +742,6 @@ torRead sock amt =
     do nextBuf <- readChan (tsInChan sock)
        join $ modifyMVar (tsReadWindow sock) $ \ strmWindow ->
                 do let newval = strmWindow - 1
-                   putStrLn ("newval = " ++ show newval)
                    if newval <= 450
                       then return (newval + 50, sendMe)
                       else return (newval, return ())

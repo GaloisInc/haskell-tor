@@ -79,11 +79,8 @@ main = runDefaultMain $ \ flags ->
          putStrLn ("Could not resolve www.whatismypublicip.com!")
        ((addr, _ttl) : _) ->
          do sock <- torConnect tor addr 80
-            putStrLn ("Connected to " ++ show addr)
             torWrite sock (buildGet "/")
-            putStrLn ("Wrote GET request.")
             resp <- readLoop sock
-            putStrLn ("Response: " ++ show resp)
             torClose sock ReasonDone
 
 buildGet :: String -> ByteString
@@ -99,8 +96,7 @@ readLoop sock =
   do next <- torRead sock 256
      if L.length next < 256
         then return next
-        else do putStrLn ("Read chunk: " ++ show next)
-                rest <- readLoop sock
+        else do rest <- readLoop sock
                 return (next `L.append` rest)
 
 -- -----------------------------------------------------------------------------

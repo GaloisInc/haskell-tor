@@ -17,10 +17,12 @@ module Tor(
        )
  where
 
+import Control.Exception
 import Control.Monad
 import Data.Maybe
 import Data.Word
 import Network.TLS
+import System.Timeout
 import Tor.Circuit
 import Tor.DataFormat.RelayCell
 import Tor.DataFormat.TorAddress
@@ -49,10 +51,37 @@ startTor ns o =
      when (not isRelay && isExit) $
        do torLog o "WARNING: Requested exit without relay support: weird."
           torLog o "WARNING: Please check that this is really what you want."
+     let res = Tor cm
+     when (isRelay || isExit) $
+       handle (checkPublicFail o) $
+         do _      <- torResolveName res "google.com" -- not important
+            addrs  <- getAddresses creds
+            torLog o ("I believe I have the following addrs: " ++ show addrs)
+            fin <- timeout (15 * 1000000) $ tryConnect res orPort addrs
+            unless (isJust fin) $ fail "Timeout connecting to myself."
+            torLog o ("At least one of which is routable. Starting relay.")
+            (_, PrivKeyRSA pkey) <- getSigningKey creds
+            desc <- getRouterDesc creds
+            sendRouterDescription ns (torLog o) dirDB desc pkey
      return (Tor cm)
  where
   isRelay    = isJust (torRelayOptions o)
   isExit     = isJust (torExitOptions o)
+  orPort     = maybe 9374 torOnionPort (torRelayOptions o)
+
+tryConnect :: Tor -> Word16 -> [TorAddress] -> IO ()
+tryConnect _   _ []       = fail "Could not connect to any addresses."
+tryConnect tor p (x:rest) =
+  handle failRecurse $
+    do con <- torConnect tor x p
+       torClose con ReasonDone
+ where
+  failRecurse :: SomeException -> IO ()
+  failRecurse _ = tryConnect tor p rest
+
+checkPublicFail :: TorOptions -> SomeException -> IO ()
+checkPublicFail o _ =
+  torLog o ("Failed to create connection to myself. No relay/exit support.")
 
 -- -----------------------------------------------------------------------------
 
