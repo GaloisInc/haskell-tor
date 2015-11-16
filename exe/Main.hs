@@ -80,7 +80,7 @@ main = runDefaultMain $ \ flags ->
        ((addr, _ttl) : _) ->
          do sock <- torConnect tor addr 80
             putStrLn ("Connected to " ++ show addr)
-            torWrite sock (buildGet "http://uhsure.com/")
+            torWrite sock (buildGet "/")
             putStrLn ("Wrote GET request.")
             resp <- readLoop sock
             putStrLn ("Response: " ++ show resp)
