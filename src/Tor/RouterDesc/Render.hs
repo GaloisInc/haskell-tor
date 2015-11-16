@@ -9,6 +9,7 @@ import Crypto.Number.Serialize
 import Crypto.PubKey.RSA
 import Crypto.PubKey.RSA.PKCS15
 import Data.Bits
+import Data.ByteArray(convert)
 import Data.ByteString.Base64
 import Data.ByteString(ByteString)
 import qualified Data.ByteString as BS
@@ -176,7 +177,7 @@ renderNTorKey r =
     Nothing -> return ()
     Just k -> 
       do putWord "ntor-onion-key"
-         putWord (BSC.unpack (encode k))
+         putWord (BSC.unpack (encode (convert k)))
          endLine
 
 renderSigningKey :: RouterDesc -> Render ()
@@ -238,18 +239,14 @@ renderFamily r =
     do putWord "family"
        putSeperated " " renderRouterFamily (routerFamily r)
  where
-  renderRouterFamily :: (Maybe ByteString, Maybe [Char]) -> Render ()
-  renderRouterFamily (Nothing, Nothing) = return () -- fail?
-  renderRouterFamily (Just x,  Nothing) =
+  renderRouterFamily :: NodeFamily -> Render ()
+  renderRouterFamily (NodeFamilyNickname n) = put n
+  renderRouterFamily (NodeFamilyDigest d)   = put "$" >> put (showHex d)
+  renderRouterFamily (NodeFamilyBoth n d)   =
     do put "$"
-       put (showHex x)
-  renderRouterFamily (Nothing, Just y) =
-    do put y
-  renderRouterFamily (Just x,  Just y) =
-    do put "$"
-       put (showHex x)
+       put (showHex d)
        put "="
-       put y
+       put n
 
 renderReadHistory :: RouterDesc -> Render ()
 renderReadHistory r = renderHistory "read" (routerReadHistory r)

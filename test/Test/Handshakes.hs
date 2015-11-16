@@ -58,7 +58,7 @@ instance Arbitrary RouterNTor where
        let ((pub, priv), g1) = withDRG g0 generate25519
            (fprint, g2)      = withRandomBytes g1 20 id
            desc = blankRouterDesc{ routerFingerprint = fprint
-                                 , routerNTorOnionKey = Just (convert pub)
+                                 , routerNTorOnionKey = Just pub
                                  }
        return (RouterNTor desc priv)
 
@@ -73,16 +73,16 @@ tapHandshakeCheck circId (RouterTAP myRouter priv) g0 =
        Right (fenc', benc') ->
          (circId == circIdD) && (fenc == fenc') && (benc == benc')
 
-ntorHandshakeCheck :: RouterNTor -> TorRNG -> Bool
-ntorHandshakeCheck (RouterNTor router littleB) g0 =
+ntorHandshakeCheck :: Word32 -> RouterNTor -> TorRNG -> Bool
+ntorHandshakeCheck circId (RouterNTor router littleB) g0 =
   case startNTorHandshake router g0 of
     (_, Nothing) ->
       False
     (g1, Just (pair, cbody)) ->
-      case advanceNTorHandshake router littleB cbody g1 of
+      case advanceNTorHandshake router littleB circId cbody g1 of
         (_, Left err) ->
           False
-        (_, Right (dbody, fenc, benc)) ->
+        (_, Right (Created2 _ dbody, fenc, benc)) ->
           case completeNTorHandshake router pair dbody of
             Left err ->
               False

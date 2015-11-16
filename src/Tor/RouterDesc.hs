@@ -1,13 +1,15 @@
 module Tor.RouterDesc(
          RouterDesc(..)
        , blankRouterDesc
+       , NodeFamily(..)
        , ExitRule(..)
        , AddrSpec(..)
        , PortSpec(..)
        )
  where
 
-import Crypto.PubKey.RSA
+import Crypto.PubKey.Curve25519 as Curve
+import Crypto.PubKey.RSA as RSA
 import Data.ByteString(ByteString, empty)
 import Data.Hourglass
 import Data.Word
@@ -26,14 +28,14 @@ data RouterDesc = RouterDesc {
      , routerFingerprint             :: ByteString
      , routerHibernating             :: Bool
      , routerUptime                  :: Maybe Integer
-     , routerOnionKey                :: PublicKey
-     , routerNTorOnionKey            :: Maybe ByteString
-     , routerSigningKey              :: PublicKey
+     , routerOnionKey                :: RSA.PublicKey
+     , routerNTorOnionKey            :: Maybe Curve.PublicKey
+     , routerSigningKey              :: RSA.PublicKey
      , routerExitRules               :: [ExitRule]
      , routerIPv6Policy              :: Either [PortSpec] [PortSpec]
      , routerSignature               :: ByteString
      , routerContact                 :: Maybe String
-     , routerFamily                  :: [(Maybe ByteString, Maybe String)]
+     , routerFamily                  :: [NodeFamily]
      , routerReadHistory             :: Maybe (DateTime, Int, [Int])
      , routerWriteHistory            :: Maybe (DateTime, Int, [Int])
      , routerCachesExtraInfo         :: Bool
@@ -85,6 +87,11 @@ blankRouterDesc =
   , routerAlternateORAddresses    = []
   , routerStatus                  = []
   }
+
+data NodeFamily = NodeFamilyNickname String
+                | NodeFamilyDigest ByteString
+                | NodeFamilyBoth String ByteString
+ deriving (Show)
 
 data ExitRule = ExitRuleAccept AddrSpec PortSpec
               | ExitRuleReject AddrSpec PortSpec

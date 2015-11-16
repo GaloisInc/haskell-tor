@@ -14,14 +14,15 @@ hansNetworkStack :: (HasTcp stack, HasDns stack) =>
                     stack ->
                     TorNetworkStack Socket Socket
 hansNetworkStack ns = TorNetworkStack {
-    Tor.NetworkStack.connect = systemConnect ns
-  , Tor.NetworkStack.listen  = systemListen ns
-  , Tor.NetworkStack.accept  = systemAccept
-  , Tor.NetworkStack.recv    = systemRead
-  , Tor.NetworkStack.write   = systemWrite
-  , Tor.NetworkStack.flush   = const (return ())
-  , Tor.NetworkStack.close   = close
-  , Tor.NetworkStack.lclose  = close
+    Tor.NetworkStack.connect    = systemConnect ns
+  , Tor.NetworkStack.getAddress = systemLookup ns
+  , Tor.NetworkStack.listen     = systemListen ns
+  , Tor.NetworkStack.accept     = systemAccept
+  , Tor.NetworkStack.recv       = systemRead
+  , Tor.NetworkStack.write      = systemWrite
+  , Tor.NetworkStack.flush      = const (return ())
+  , Tor.NetworkStack.close      = close
+  , Tor.NetworkStack.lclose     = close
   }
 
 systemConnect :: (HasTcp stack, HasDns stack) =>
@@ -41,6 +42,11 @@ systemConnect stack addr port =
        case hostAddresses hentry of
          []    -> return Nothing
          (i:_) -> return (Just i)
+
+systemLookup :: HasDns stack => stack -> String -> IO [TorAddress]
+systemLookup stack name =
+  do host <- getHostByName stack name
+     return (map (TorAddr.IP4 . show) (hostAddresses host))
 
 systemListen :: (HasTcp stack) =>
                 stack -> Word16 ->

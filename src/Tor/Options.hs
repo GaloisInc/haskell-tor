@@ -69,6 +69,12 @@ data TorRelayOptions = TorRelayOptions {
       -- |A contact email address. If not provided, we will either provide
       -- no email address or just include a junk address.
     , torContact   :: Maybe String
+      -- |If you're setting up a number of nodes within the same operating
+      -- environment, you might want to provide a "family" identifier. That way,
+      -- those building circuits can limit what percentage of their hops might
+      -- go through this group. A node can be a member of zero, one, or more
+      -- families, thus the list.
+    , torFamilies  :: [NodeFamily]
       -- |The maximum number of links from this node. Note that this should be
       -- greater than or equal to torTargetLinks if this node is also to be used
       -- as an entrance node.
@@ -83,22 +89,34 @@ defaultTorRelayOptions  = TorRelayOptions {
     torOnionPort    = 9374
   , torNickname     = ""
   , torContact      = Nothing
+  , torFamilies     = []
   , torMaximumLinks = 50
   }
 
 data TorExitOptions = TorExitOptions {
       -- |The rules for allowing or rejecting traffic leaving this node.
       torExitRules :: [ExitRule]
+      -- |The ports to disallow (Left) or allow (Right) when forwarding
+      -- IPv6 traffic.
+    , torIPv6Policy :: Either [PortSpec] [PortSpec]
+      -- |Set this flag if you want to allow single-hop exits. These are
+      -- usually not advisable, but according to the spec they may be
+      -- usefule for "specialized controllers desgined to support perspective
+      -- access and such."
+    , torAllowSingleHopExits :: Bool
     }
 
 -- |A reasonable default exit node options. This allows all outgoing
 -- traffic to ports 22 (SSH), 80 (HTTP), 443 (HTTPS), 465 (SMTPS), and
--- 993 (IMAPS).
+-- 993 (IMAPS), and disallows single hop exits.
 defaultTorExitOptions :: TorExitOptions
 defaultTorExitOptions  = TorExitOptions {
     torExitRules = map (\ p -> ExitRuleAccept AddrSpecAll (PortSpecSingle p))
-                       [22, 80, 443, 465, 993]
+                       allowPorts
+  , torIPv6Policy = Right (map PortSpecSingle allowPorts)
+  , torAllowSingleHopExits = False
   }
+ where allowPorts = [22, 80, 443, 465, 993]
 
 -- -----------------------------------------------------------------------------
 

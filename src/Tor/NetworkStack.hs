@@ -17,14 +17,17 @@ import Tor.DataFormat.TorAddress
 data SomeNetworkStack = forall lsock sock . HasBackend sock => MkNS (TorNetworkStack lsock sock)
 
 data TorNetworkStack lsock sock = TorNetworkStack {
-       connect :: String -> Word16       -> IO (Maybe sock)
-     , listen  :: Word16                 -> IO lsock
-     , accept  :: lsock                  -> IO (sock, TorAddress)
-     , recv    :: sock   -> Int          -> IO S.ByteString
-     , write   :: sock   -> L.ByteString -> IO ()
-     , flush   :: sock                   -> IO ()
-     , close   :: sock                   -> IO ()
-     , lclose  :: lsock                  -> IO ()
+       connect    :: String -> Word16       -> IO (Maybe sock)
+       -- |Lookup the given hostname and return any IP6 (Left) or IP4 (Right)
+       -- addresses associated with it.
+     , getAddress :: String                 -> IO [TorAddress]
+     , listen     :: Word16                 -> IO lsock
+     , accept     :: lsock                  -> IO (sock, TorAddress)
+     , recv       :: sock   -> Int          -> IO S.ByteString
+     , write      :: sock   -> L.ByteString -> IO ()
+     , flush      :: sock                   -> IO ()
+     , close      :: sock                   -> IO ()
+     , lclose     :: lsock                  -> IO ()
      }
 
 recvLine :: TorNetworkStack ls s -> s -> IO L.ByteString

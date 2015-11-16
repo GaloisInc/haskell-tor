@@ -48,6 +48,7 @@ import Data.X509 hiding (HashSHA1, HashSHA256)
 import Data.X509.CertificateStore
 import Network.TLS hiding (Credentials)
 import qualified Network.TLS as TLS
+import Tor.DataFormat.RelayCell
 import Tor.DataFormat.TorAddress
 import Tor.DataFormat.TorCell
 import Tor.Link.CipherSuites
@@ -98,11 +99,10 @@ initLink :: HasBackend s =>
             TorNetworkStack ls s ->
             Credentials ->
             MVar TorRNG ->
-            MVar [TorAddress] ->
             (String -> IO ()) ->
             RouterDesc ->
             IO TorLink
-initLink ns creds rngMV myAddrsMV llog them =
+initLink ns creds rngMV llog them =
   do now <- getCurrentTime
      let validity = (now, now `timeAdd` mempty{ durationHours = 2 })
      (idCert, idKey) <- getSigningKey creds
@@ -128,10 +128,7 @@ initLink ns creds rngMV myAddrsMV llog them =
             -- get their initial message
             serverCerts <- readIORef serverCertsIO
             (r2i, left, rLink, rCert, myAddr) <- getRespInitialMsgs tls serverCerts
-            myAddrs' <- modifyMVar myAddrsMV $ \ myAddrs ->
-                          let myAddrs' | myAddr `elem` myAddrs = myAddrs
-                                       | otherwise             = myAddr : myAddrs
-                          in return (myAddrs', myAddrs')
+            myAddrs' <- addNewAddresses creds myAddr
             -- build and send the CERTS message
             let certs = putCell (Certs [RSA1024Identity idCert,
                                         RSA1024Auth authCert])
@@ -436,12 +433,10 @@ exactlyOneLink ((LinkKeyCert c):rest) Nothing  = exactlyOneLink rest (Just c)
 exactlyOneLink (_:rest)               acc      = exactlyOneLink rest acc
 
 acceptLink :: HasBackend s =>
-              Credentials -> RouterDB ->
-              MVar TorRNG -> MVar [TorAddress] ->
-              (String -> IO ()) ->
+              Credentials -> RouterDB -> MVar TorRNG -> (String -> IO ()) ->
               s -> TorAddress ->
               IO TorLink
-acceptLink creds routerDB rngMV myAddrsMV llog sock who =
+acceptLink creds routerDB rngMV llog sock who =
  do now <- getCurrentTime
     let validity = (now, now `timeAdd` mempty{ durationHours = 2 })
     (idCert, idKey) <- getSigningKey creds
@@ -468,7 +463,7 @@ acceptLink creds routerDB rngMV myAddrsMV llog sock who =
     let authcbstr = putCell (AuthChallenge chalBStr [1])
     sendData tls authcbstr
     -- "... and a NETINFO cell (4.5) "
-    others <- readMVar myAddrsMV
+    others <- getAddresses creds
     epochsec <- (fromElapsed . timeGetElapsed) <$> getCurrentTime
     sendData tls (putCell (NetInfo epochsec who others))
     -- "At this point the initiator may send a NETINFO cell if it does not
@@ -583,7 +578,7 @@ acceptLink creds routerDB rngMV myAddrsMV llog sock who =
            controlChan <- newChan
            bufCh <- newMVar (Map.singleton 0 controlChan)
            thr   <- forkIO (runLink llog bufCh tls [leftOver])
-           desc  <- findRouter routerDB cid
+           desc  <- findRouter routerDB [ExtendDigest cid]
            llog ("Incoming link created from " ++ show who)
            return (TorLink tls desc True thr bufCh)
       Right (_, _, _) ->

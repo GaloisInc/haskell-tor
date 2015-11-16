@@ -7,7 +7,11 @@ module Tor.State.Credentials(
        , newCredentials
        , getSigningKey
        , getOnionKey
+       , getNTorOnionKey
        , getTLSKey
+       , getAddresses
+       , getRouterDesc
+       , addNewAddresses
        , isSignedBy
        )
  where
@@ -15,36 +19,48 @@ module Tor.State.Credentials(
 import Control.Concurrent
 import Crypto.Hash
 import Crypto.Hash.Easy
-import Crypto.PubKey.RSA
+import Crypto.PubKey.Curve25519 as Curve
+import Crypto.PubKey.RSA as RSA
+import Crypto.PubKey.RSA.KeyHash
 import Crypto.PubKey.RSA.PKCS15
 import Crypto.Random
 import Data.ASN1.OID
 import Data.ByteString(ByteString)
 import Data.Hourglass
 import Data.Hourglass.Now
+import Data.List(sortOn)
+import Data.Map.Strict(Map,empty,insertWith,toList)
 #if !MIN_VERSION_base(4,8,0)
 import Data.Monoid
 #endif
 import Data.String
+import Data.Word
 import Data.X509
 import Hexdump
+import Tor.DataFormat.TorAddress
+import Tor.Options
 import Tor.RNG
+import Tor.RouterDesc
 
 data CredentialState = CredentialState {
                          credRNG           :: TorRNG
+                       , credStartTime     :: DateTime
                        , credNextSerialNum :: Integer
+                       , credBaseDesc      :: RouterDesc
+                       , credAddresses     :: Map TorAddress Int
                        , credIdentity      :: (SignedCertificate, PrivKey)
                        , credOnion         :: (SignedCertificate, PrivKey)
+                       , credOnionNTor     :: (Curve.PublicKey,   SecretKey)
                        , credTLS           :: (SignedCertificate, PrivKey)
                        }
 
 newtype Credentials = Credentials (MVar CredentialState)
 
-newCredentials :: (String -> IO ()) -> IO Credentials
-newCredentials logMsg =
+newCredentials :: TorOptions -> IO Credentials
+newCredentials opts =
   do g   <- drgNew
      now <- getCurrentTime
-     let s = generateState g now
+     let s = generateState g opts now
      creds <- Credentials `fmap` newMVar s
      logMsg "Credentials created."
      logMsg ("  Signing key fingerprint: " ++ (showFingerprint (credIdentity s)))
@@ -52,9 +68,9 @@ newCredentials logMsg =
      logMsg ("  TLS key fingerprint:     " ++ (showFingerprint (credTLS s)))
      return creds
  where
-  -- FIXME: probably should use a real fingerprint.
+  logMsg = torLog opts
   showFingerprint c =
-    filter (/= ' ') (simpleHex (sha1 (getSignedData (fst c))))
+    filter (/= ' ') (simpleHex (keyHash sha1 (signedObject (getSigned (fst c)))))
 
 getSigningKey :: Credentials -> IO (SignedCertificate, PrivKey)
 getSigningKey = getCredentials credIdentity
@@ -62,12 +78,13 @@ getSigningKey = getCredentials credIdentity
 getOnionKey :: Credentials -> IO (SignedCertificate, PrivKey)
 getOnionKey = getCredentials credOnion
 
+getNTorOnionKey :: Credentials -> IO (Curve.PublicKey, SecretKey)
+getNTorOnionKey = getCredentials credOnionNTor
+
 getTLSKey :: Credentials -> IO (SignedCertificate, PrivKey)
 getTLSKey = getCredentials credTLS
 
-getCredentials :: (CredentialState -> (SignedCertificate, PrivKey)) ->
-                  Credentials ->
-                  IO (SignedCertificate, PrivKey)
+getCredentials :: (CredentialState -> a) -> Credentials -> IO a
 getCredentials getter (Credentials stateMV) =
   do state  <- takeMVar stateMV
      now    <- getCurrentTime
@@ -75,13 +92,74 @@ getCredentials getter (Credentials stateMV) =
      putMVar stateMV $! state'
      return (getter state')
 
-generateState :: TorRNG -> DateTime -> CredentialState
-generateState rng now = s3
+getAddresses :: Credentials -> IO [TorAddress]
+getAddresses (Credentials stateMV) =
+  withMVar stateMV $ \ state ->
+    return (orderList (credAddresses state))
+
+getRouterDesc :: Credentials -> IO RouterDesc
+getRouterDesc (Credentials stateMV) =
+  withMVar stateMV $ \ state ->
+    do let port = routerORPort (credBaseDesc state)
+           addrs = orderList (credAddresses state)
+           (ip4addr, oaddrs) = splitAddresses port False addrs
+           (onionCert, _) = credOnion state
+           PubKeyRSA onionkey = certPubKey (signedObject (getSigned onionCert))
+           (signCert, _) = credIdentity state
+           PubKeyRSA signkey = certPubKey (signedObject (getSigned signCert))
+           (ntorkey, _) = credOnionNTor state
+       now <- getCurrentTime
+       return (credBaseDesc state) {
+         routerIPv4Address = ip4addr
+       , routerFingerprint = keyHash' sha1 signkey
+       , routerUptime      = Just (fromIntegral (timeDiff (credStartTime state) now))
+       , routerOnionKey    = onionkey
+       , routerNTorOnionKey = Just ntorkey
+       , routerSigningKey   = signkey
+       , routerAlternateORAddresses = oaddrs
+       }
  where
-  s0      = CredentialState rng 100 undefined undefined undefined
+  splitAddresses :: Word16 -> Bool -> [TorAddress] -> (String, [(String, Word16)])
+  splitAddresses _ False [] = ("127.0.0.1", [])
+  splitAddresses _ True  [] = (error "Internal error (splitAddresses)", [])
+  splitAddresses p False (IP4 x : rest) = (x, snd (splitAddresses p True rest))
+  splitAddresses p state (x     : rest) =
+    let (f, rest') = splitAddresses p state rest
+    in case x of
+         IP4 a -> (f, (a,p):rest')
+         IP6 a -> (f, (a,p):rest')
+         _     -> (f, rest')
+
+addNewAddresses :: Credentials -> TorAddress -> IO [TorAddress]
+addNewAddresses (Credentials stateMV) addr =
+  modifyMVar stateMV $ \ state ->
+    do let addrs' = insertWith (+) addr 1 (credAddresses state)
+           state' = state{ credAddresses = addrs' }
+       return (state', orderList addrs')
+
+orderList :: Map TorAddress Int -> [TorAddress]
+orderList x = reverse (map fst (sortOn snd (toList x)))
+
+generateState :: TorRNG -> TorOptions -> DateTime -> CredentialState
+generateState rng opts now = s3
+ where
+  s0      = CredentialState rng now 100 desc empty un un un un
+  un      = undefined
   (s1, _) = maybeRegenId    True now s0
   (s2, _) = maybeRegenOnion True now s1
   (s3, _) = maybeRegenTLS   True now s2
+  --
+  desc    = blankRouterDesc {
+    routerNickname                = maybe "" torNickname (torRelayOptions opts)
+  , routerORPort                  = maybe 9001 torOnionPort (torRelayOptions opts)
+  , routerPlatformName            = "Haskell"
+  , routerEntryPublished          = timeFromElapsed (Elapsed (Seconds 0))
+  , routerExitRules               = maybe [] torExitRules (torExitOptions opts)
+  , routerIPv6Policy              = maybe (Left [PortSpecAll]) torIPv6Policy (torExitOptions opts)
+  , routerContact                 = maybe Nothing torContact (torRelayOptions opts)
+  , routerFamily                  = maybe [] torFamilies (torRelayOptions opts)
+  , routerAllowSingleHopExits     = maybe False torAllowSingleHopExits (torExitOptions opts)
+  }
 
 updateKeys :: CredentialState -> DateTime -> CredentialState
 updateKeys s0 now = s3
@@ -121,8 +199,18 @@ maybeRegenOnion force now state | force || (now > expiration) = (state', True)
                            "haskell tor node" (now, twoWeeks)
   twoWeeks  = now `timeAdd` mempty{ durationHours = (14 * 24) }
   --
-  state' = state{ credRNG = g', credNextSerialNum = serial + 1
-                , credOnion = (cert, PrivKeyRSA priv) }
+  findKey rng =
+    let (bytes, rng') = withRandomBytes rng 32 id
+    in case secretKey (bytes :: ByteString) of
+         Left _        -> findKey rng'
+         Right privkey -> (privkey, rng')
+  (privntor, g'') = findKey g'
+  pubntor = toPublic privntor
+  --
+  state' = state{ credRNG = g'', credNextSerialNum = serial + 1
+                , credOnion = (cert, PrivKeyRSA priv)
+                , credOnionNTor = (pubntor, privntor)
+                }
 
 maybeRegenTLS :: Bool -> DateTime -> CredentialState -> (CredentialState,Bool)
 maybeRegenTLS force now state | force || (now > expiration) = (state', True)
@@ -169,7 +257,7 @@ signMsg (PrivKeyRSA key) bstr = (sig, SignatureALG HashSHA1 PubKeyALG_RSA, ())
   errorLeft (Right x) = x
 signMsg _                _     = error "Sign with non-RSA private key."
 
-generateKeyPair :: DRG g => g -> Int -> (PublicKey, PrivateKey, g)
+generateKeyPair :: DRG g => g -> Int -> (RSA.PublicKey, PrivateKey, g)
 generateKeyPair g bitSize = (pubKey, privKey, g')
  where
   ((pubKey, privKey), g') = withDRG g (generate (bitSize `div` 8) 65537)

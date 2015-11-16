@@ -1,11 +1,13 @@
 {-# LANGUAGE RecordWildCards #-}
 module Tor.Circuit(
        -- * High-level type for Tor circuits, and operations upon them.
-         TorCircuit
+         OriginatedCircuit
        , createCircuit
-       , acceptCircuit
        , destroyCircuit
        , extendCircuit
+       , TransverseCircuit
+       , acceptCircuit
+       , destroyTransverse
        -- * Name resolution support.
        , resolveName
        -- * Tor sockets.
@@ -28,7 +30,7 @@ module Tor.Circuit(
 
 import Control.Concurrent
 import Control.Exception
-import Control.Monad(void, when, unless, forever, join)
+import Control.Monad(void, when, unless, forever, join, forM_)
 import Crypto.Cipher.AES
 import Crypto.Cipher.Types
 import Crypto.Error
@@ -59,7 +61,9 @@ import Data.Map.Strict(Map)
 import qualified Data.Map.Strict as Map
 import Data.Tuple
 import Data.Word
+import Data.X509
 import Hexdump
+import Network.TLS(HasBackend)
 #if !MIN_VERSION_base(4,8,0)
 import Prelude hiding (mapM_)
 #endif
@@ -69,115 +73,127 @@ import Tor.DataFormat.TorCell
 import Tor.HybridCrypto
 import Tor.Link
 import Tor.Link.DH
+import Tor.NetworkStack
+import Tor.Options
 import Tor.RNG
 import Tor.RouterDesc
+import Tor.State.Credentials
+import Tor.State.Routers
 
 -- -----------------------------------------------------------------------------
 
-data TorCircuit =
-       OriginatedTorCircuit {
-         circLink            :: TorLink
-       , circLog             :: String -> IO ()
-       , circId              :: Word32
-       , circRNG             :: MVar TorRNG
-       , circState           :: MVar (Either DestroyReason [ThreadId])
-       , circTakenStreamIds  :: MVar IntSet
-       , circExtendWaiter    :: MVar RelayCell
-       , circResolveWaiters  :: MVar (Map Word16 (MVar [(TorAddress, Word32)]))
-       , circSockets         :: MVar (Map Word16 TorSocket)
-       , circConnWaiters     :: MVar (Map Word16 (MVar (Either String TorSocket)))
-       , circForeCryptoData  :: MVar [CryptoData]
-       , circBackCryptoData  :: MVar [CryptoData]
-       }
-     | TransverseTorCircuit {
-         circLink            :: TorLink
-       , circLog             :: String -> IO ()
-       , circId              :: Word32
-       , circRNG             :: MVar TorRNG
-       , circForeCryptoData  :: MVar [CryptoData]
-       , circBackCryptoData  :: MVar [CryptoData]
+-- |A circuit that originates with this node
+data OriginatedCircuit = OriginatedCircuit {
+         ocLink            :: TorLink
+       , ocLog             :: String -> IO ()
+       , ocId              :: Word32
+       , ocRNG             :: MVar TorRNG
+       , ocOptions         :: TorOptions
+       , ocState           :: MVar (Either DestroyReason [ThreadId])
+       , ocTakenStreamIds  :: MVar IntSet
+       , ocExtendWaiter    :: MVar RelayCell
+       , ocResolveWaiters  :: MVar (Map Word16 (MVar [(TorAddress, Word32)]))
+       , ocSockets         :: MVar (Map Word16 TorSocket)
+       , ocConnWaiters     :: MVar (Map Word16 (MVar (Either String TorSocket)))
+       , ocForeCryptoData  :: MVar [CryptoData]
+       , ocBackCryptoData  :: MVar [CryptoData]
        }
 
-createCircuit :: MVar TorRNG -> (String -> IO ()) ->
+createCircuit :: MVar TorRNG -> TorOptions ->
                  TorLink -> RouterDesc -> Word32 ->
-                 IO TorCircuit
-createCircuit circRNG circLog circLink router1 circId =
+                 IO OriginatedCircuit
+createCircuit ocRNG ocOptions ocLink router1 ocId =
   case routerNTorOnionKey router1 of
     Nothing ->
-      do (x,cbstr) <- modifyMVar circRNG (return . startTAPHandshake router1)
-         linkWrite circLink (Create circId cbstr)
-         Created cid bstr <- linkRead circLink circId
-         unless ((circId == cid) && (S.length bstr == (128    + 20))) $
+      do (x,cbstr) <- modifyMVar' ocRNG (startTAPHandshake router1)
+         linkWrite ocLink (Create ocId cbstr)
+         Created cid bstr <- linkRead ocLink ocId
+         unless ((ocId == cid) && (S.length bstr == (128    + 20))) $
            fail "Unacceptable response to CREATE message."
          finishCreateCircuit (completeTAPHandshake x bstr)
     Just _ ->
-      do Just (pair, cbody) <- modifyMVar circRNG
-                                  (return . startNTorHandshake router1)
-         linkWrite circLink (Create2 circId NTor cbody)
-         Created2 cid bstr <- linkRead circLink circId
-         unless ((circId == cid) && (S.length bstr == (32 + 32))) $
+      do Just (pair, cbody) <- modifyMVar' ocRNG (startNTorHandshake router1)
+         linkWrite ocLink (Create2 ocId NTor cbody)
+         Created2 cid bstr <- linkRead ocLink ocId
+         unless ((ocId == cid) && (S.length bstr == (32 + 32))) $
            fail "Unacceptable response to CREATE2 message."
          finishCreateCircuit (completeNTorHandshake router1 pair bstr)
  where
+  ocLog = torLog ocOptions
   finishCreateCircuit (Left err) = failLog ("Create handshake failed: " ++ err)
   finishCreateCircuit (Right (fencstate, bencstate)) =
-    do circForeCryptoData <- newMVar [fencstate]
-       circBackCryptoData <- newMVar [bencstate]
-       circState          <- newEmptyMVar
-       circTakenStreamIds <- newMVar IntSet.empty
-       circExtendWaiter   <- newEmptyMVar
-       circSockets        <- newMVar Map.empty
-       circResolveWaiters <- newMVar Map.empty
-       circConnWaiters    <- newMVar Map.empty
-       let circ = OriginatedTorCircuit { .. }
+    do ocForeCryptoData <- newMVar [fencstate]
+       ocBackCryptoData <- newMVar [bencstate]
+       ocState          <- newEmptyMVar
+       ocTakenStreamIds <- newMVar IntSet.empty
+       ocExtendWaiter   <- newEmptyMVar
+       ocSockets        <- newMVar Map.empty
+       ocResolveWaiters <- newMVar Map.empty
+       ocConnWaiters    <- newMVar Map.empty
+       let circ = OriginatedCircuit { .. }
        handler <- forkIO (runBackward circ)
-       putMVar circState (Right [handler])
-       circLog ("Created circuit " ++ show circId)
+       putMVar ocState (Right [handler])
+       ocLog ("Created circuit " ++ show ocId)
        return circ
   --
-  failLog str = circLog str >> throwIO (userError str)
+  failLog str = ocLog str >> throwIO (userError str)
   runBackward circ =
-    forever $ do next <- linkRead circLink circId
+    forever $ do next <- linkRead ocLink ocId
                  processBackwardInput circ next
 
-acceptCircuit :: (String -> IO ()) -> PrivateKey ->
-                 TorLink -> MVar TorRNG ->
-                 IO TorCircuit
-acceptCircuit circLog priv circLink circRNG =
-  do msg <- linkRead circLink 0
-     case msg of
-       Create circId bstr ->
-         do (created, fes, bes) <- modifyMVar circRNG
-                                    (return . advanceTAPHandshake priv circId bstr)
-            circForeCryptoData <- newMVar [fes]
-            circBackCryptoData <- newMVar [bes]
-            let circ            = TransverseTorCircuit { .. }
-            linkWrite circLink created
-            circLog ("Created transverse circuit " ++ show circId)
-            return circ
-       CreateFast _circId _bstr ->
-         undefined
-       Create2 _circId _hsType _bstr ->
-         undefined
-       _ ->
-         undefined
-
+extendCircuit :: OriginatedCircuit -> RouterDesc -> IO ()
+extendCircuit circ nxt =
+  do state <- readMVar (ocState circ)
+     when (isLeft state) $
+       throwIO (userError ("Attempted to extend a closed circuit."))
+     case Nothing of -- routerNTorOnionKey nxt of
+       Nothing ->
+         do (x,b) <- modifyMVar' (ocRNG circ) (startTAPHandshake nxt)
+            writeCellOnCircuit circ RelayExtend {
+                relayStreamId      = 0
+              , relayExtendAddress = routerIPv4Address nxt
+              , relayExtendPort    = routerORPort nxt
+              , relayExtendSkin    = b
+              , relayExtendIdent   = keyHash' sha1 (routerSigningKey nxt)
+              }
+            res@RelayExtended{} <- takeMVar (ocExtendWaiter circ)
+            finishExtend (completeTAPHandshake x (relayExtendedData res))
+       Just _ ->
+         do Just (p,b) <- modifyMVar' (ocRNG circ) (startNTorHandshake nxt)
+            let ip4 = routerIPv4Address nxt
+            writeCellOnCircuit circ RelayExtend2 {
+                relayStreamId      = 0
+              , relayExtendTarget  = [ExtendIP4 ip4 (routerORPort nxt)]
+              , relayExtendType    = NTor
+              , relayExtendData    = b
+              }
+            res@RelayExtended2{} <- takeMVar (ocExtendWaiter circ)
+            finishExtend (completeNTorHandshake nxt p (relayExtendedData res))
+ where
+  finishExtend (Left err) =
+    throwIO (userError ("Failed extension handshake on circuit " ++
+                        show (ocId circ) ++ ": " ++ err))
+  finishExtend (Right (fencstate, bencstate)) =
+    do modifyMVar_ (ocForeCryptoData circ) $ \ rest ->
+         return (rest ++ [fencstate])
+       modifyMVar_ (ocBackCryptoData circ) $ \ rest ->
+         return (rest ++ [bencstate])
 
 -- |Destroy a circuit, and all the streams and computations running through it.
-destroyCircuit :: TorCircuit -> DestroyReason -> IO ()
+destroyCircuit :: OriginatedCircuit -> DestroyReason -> IO ()
 destroyCircuit circ rsn =
-  do ts <- modifyMVar (circState circ) $ \ state ->
+  do ts <- modifyMVar (ocState circ) $ \ state ->
             case state of
               Left _ -> return (state, [])
               Right threads ->
-                do mapM_ killSockets     =<< readMVar (circSockets circ)
-                   mapM_ killConnWaiters =<< readMVar (circConnWaiters circ)
-                   mapM_ killResWaiters  =<< readMVar (circResolveWaiters circ)
+                do mapM_ killSockets     =<< readMVar (ocSockets circ)
+                   mapM_ killConnWaiters =<< readMVar (ocConnWaiters circ)
+                   mapM_ killResWaiters  =<< readMVar (ocResolveWaiters circ)
                    -- FIXME: Send a message out, kill the crypto after
-                   _ <- takeMVar (circForeCryptoData circ)
-                   _ <- takeMVar (circBackCryptoData circ)
-                   circLog circ ("Destroy circuit " ++ show (circId circ) ++
-                                 ": " ++ show rsn)
+                   _ <- takeMVar (ocForeCryptoData circ)
+                   _ <- takeMVar (ocBackCryptoData circ)
+                   ocLog circ ("Destroy circuit " ++ show (ocId circ) ++
+                               ": " ++ show rsn)
                    return (Left rsn, threads)
      mapM_ killThread ts
  where
@@ -189,53 +205,12 @@ destroyCircuit circ rsn =
   killResWaiters mv =
     void $ tryPutMVar mv []
 
-extendCircuit :: TorCircuit -> RouterDesc -> IO ()
-extendCircuit circ nxt =
-  do state <- readMVar (circState circ)
-     when (isLeft state) $
-       throwIO (userError ("Attempted to extend a closed circuit."))
-     case Nothing of -- routerNTorOnionKey nxt of
-       Nothing ->
-         do (x,b) <- modifyMVar (circRNG circ) (return . startTAPHandshake nxt)
-            writeCellOnCircuit circ RelayExtend {
-                relayStreamId      = 0
-              , relayExtendAddress = IP4 (routerIPv4Address nxt)
-              , relayExtendPort    = routerORPort nxt
-              , relayExtendSkin    = b
-              , relayExtendIdent   = keyHash' sha1 (routerSigningKey nxt)
-              }
-            res@RelayExtended{} <- takeMVar (circExtendWaiter circ)
-            finishExtend (completeTAPHandshake x (relayExtendedData res))
-       Just _ ->
-         do Just (p,b) <- modifyMVar (circRNG circ)
-                            (return . startNTorHandshake nxt)
-            let ip4 = torAddressByteString (IP4 (routerIPv4Address nxt))
-            writeCellOnCircuit circ RelayExtend2 {
-                relayStreamId      = 0
-              , relayExtendTarget  = [ExtendIP4 ip4 (routerORPort nxt)]
-              , relayExtendType    = NTor
-              , relayExtendData    = b
-              }
-            res@RelayExtended2{} <- takeMVar (circExtendWaiter circ)
-            finishExtend (completeNTorHandshake nxt p (relayExtendedData res))
- where
-  finishExtend (Left err) =
-    throwIO (userError ("Failed extension handshake on circuit " ++
-                        show (circId circ) ++ ": " ++ err))
-  finishExtend (Right (fencstate, bencstate)) =
-    do modifyMVar_ (circForeCryptoData circ) $ \ rest ->
-         return (rest ++ [fencstate])
-       modifyMVar_ (circBackCryptoData circ) $ \ rest ->
-         return (rest ++ [bencstate])
-
--- ----------------------------------------------------------------------------
-
-writeCellOnCircuit :: TorCircuit -> RelayCell -> IO ()
+writeCellOnCircuit :: OriginatedCircuit -> RelayCell -> IO ()
 writeCellOnCircuit circ relay =
-  do keysnhashes <- takeMVar (circForeCryptoData circ)
+  do keysnhashes <- takeMVar (ocForeCryptoData circ)
      let (cell, keysnhashes') = synthesizeRelay keysnhashes
-     linkWrite (circLink circ) (pickBuilder relay (circId circ) cell)
-     putMVar (circForeCryptoData circ) keysnhashes'
+     linkWrite (ocLink circ) (pickBuilder relay (ocId circ) cell)
+     putMVar (ocForeCryptoData circ) keysnhashes'
  where
   synthesizeRelay [] = error "synthesizeRelay reached empty list?!"
   synthesizeRelay [(estate, hash)] =
@@ -251,31 +226,136 @@ writeCellOnCircuit circ relay =
   pickBuilder RelayExtend2{} = RelayEarly
   pickBuilder _              = RelayEarly
 
-circSendUpstream :: TorCircuit -> TorCell -> IO ()
-circSendUpstream = error "circSendUpstream"
+-- ----------------------------------------------------------------------------
+
+data TransverseCircuit s = TransverseCircuit {
+         tcLink            :: TorLink
+       , tcNextHop         :: MVar TorLink
+       , tcLog             :: String -> IO ()
+       , tcId              :: Word32
+       , tcRNG             :: MVar TorRNG
+       , tcOptions         :: TorOptions
+       , tcCredentials     :: Credentials
+       , tcRouterDB        :: RouterDB
+       , tcConnections     :: MVar (Map Word16 s)
+       , tcThreads         :: MVar [ThreadId]
+       , tcForeCryptoData  :: MVar CryptoData
+       , tcBackCryptoData  :: MVar CryptoData
+       }
+
+acceptCircuit :: HasBackend s =>
+                 TorNetworkStack ls s -> TorOptions ->
+                 RouterDesc -> Credentials -> RouterDB ->
+                 TorLink -> MVar TorRNG ->
+                 IO (Maybe (TransverseCircuit s))
+acceptCircuit ns tcOptions me tcCredentials tcRouterDB tcLink tcRNG =
+  do msg <- linkRead tcLink 0
+     (_, PrivKeyRSA priv) <- getOnionKey tcCredentials
+     (_, skey) <- getNTorOnionKey tcCredentials
+     case msg of
+       Create tcId bstr ->
+         do (created, fes, bes) <- modifyMVar' tcRNG
+                                    (advanceTAPHandshake priv tcId bstr)
+            tcForeCryptoData <- newMVar fes
+            tcBackCryptoData <- newMVar bes
+            tcConnections    <- newMVar Map.empty
+            tcThreads        <- newEmptyMVar
+            tcNextHop        <- newEmptyMVar
+            let circ          = TransverseCircuit { .. }
+            thread           <- forkIO (runForward circ)
+            putMVar tcThreads [thread]
+            linkWrite tcLink created
+            tcLog ("Created transverse circuit " ++ show tcId)
+            return (Just circ)
+       Create2 tcId TAP bstr ->
+         do (created, fes, bes) <- modifyMVar' tcRNG
+                                    (advanceTAPHandshake priv tcId bstr)
+            tcForeCryptoData <- newMVar fes
+            tcBackCryptoData <- newMVar bes
+            tcConnections    <- newMVar Map.empty
+            tcThreads        <- newEmptyMVar
+            tcNextHop        <- newEmptyMVar
+            let circ          = TransverseCircuit { .. }
+            thread           <- forkIO (runForward circ)
+            putMVar tcThreads [thread]
+            linkWrite tcLink created
+            tcLog ("Created transverse circuit " ++ show tcId)
+            return (Just circ)
+       Create2 tcId NTor bstr ->
+         -- FIXME: Really should gate this on "UseNTorHandshake" being in the
+         -- consensus parameters.
+         do res <- modifyMVar' tcRNG (advanceNTorHandshake me skey tcId bstr)
+            case res of
+              Left err ->
+                do tcLog ("Error creating transverse circuit: " ++ err)
+                   linkWrite tcLink (Destroy tcId TorProtocolViolation)
+                   return Nothing
+              Right (response, fes, bes) ->
+                do tcForeCryptoData <- newMVar fes
+                   tcBackCryptoData <- newMVar bes
+                   tcConnections    <- newMVar Map.empty
+                   tcThreads        <- newEmptyMVar
+                   tcNextHop        <- newEmptyMVar
+                   let circ          = TransverseCircuit { .. }
+                   thread           <- forkIO (runForward circ)
+                   putMVar tcThreads [thread]
+                   linkWrite tcLink response
+                   tcLog ("Create transverse circuit (ntor) " ++ show tcId)
+                   return (Just circ)
+       Create2 tcId hstype _ ->
+         do tcLog ("Unfamiliar CREATE2 handshake type: " ++ show hstype)
+            linkWrite tcLink (Destroy tcId TorProtocolViolation)
+            return Nothing
+       CreateFast tcId _ ->
+         -- FIXME: Really should look up "usecreatefast" in the consensus
+         -- parameters.
+         do tcLog ("Rejecting CREATE_FAST attempt.")
+            linkWrite tcLink (Destroy tcId TorProtocolViolation)
+            return Nothing
+       _ ->
+         do tcLog ("Unexpected message waiting for CREATE: " ++ show msg)
+            linkWrite tcLink (Destroy 0 TorProtocolViolation)
+            return Nothing
+ where
+  tcLog = torLog tcOptions
+  runForward circ =
+    forever $ do next <- linkRead tcLink (tcId circ)
+                 processForwardInput ns circ next
+
+destroyTransverse :: TorNetworkStack ls s ->
+                     TransverseCircuit s -> DestroyReason ->
+                     IO ()
+destroyTransverse ns circ rsn =
+  do tcLog circ ("Destroy transverse circuit: " ++ show rsn)
+     mlink <- tryTakeMVar (tcNextHop circ)
+     case mlink of
+       Nothing   -> return ()
+       Just link -> linkClose link
+     thrs <- takeMVar (tcThreads circ)
+     forM_ thrs killThread
+     conns <- takeMVar (tcConnections circ)
+     forM_ (Map.elems conns) $ \ s -> close ns s
 
 -- ----------------------------------------------------------------------------
 
-processBackwardInput :: TorCircuit -> TorCell -> IO ()
+processBackwardInput :: OriginatedCircuit -> TorCell -> IO ()
 processBackwardInput circ cell =
   handle logException $
     case cell of
-      Relay      circId body -> processBackwardRelay circ circId body
-      RelayEarly circId body -> processBackwardRelay circ circId body
-      Destroy    _      rsn  -> destroyCircuit circ rsn
-      _                      ->
-        circLog circ ("Spurious message along circuit.")
+      Relay      _ body -> processBackwardRelay circ body
+      RelayEarly _ body -> processBackwardRelay circ body
+      Destroy    _ rsn  -> destroyCircuit circ rsn
+      _                 -> ocLog circ ("Spurious message along circuit.")
  where
   logException e =
-    circLog circ ("Caught exception processing backwards input: "
-                  ++ show (e :: SomeException))
+    ocLog circ ("Caught exception processing backwards input: "
+                ++ show (e :: SomeException))
 
-processBackwardRelay :: TorCircuit -> Word32 -> ByteString -> IO ()
-processBackwardRelay circ circId body =
-  do clearBody <- modifyMVar (circBackCryptoData circ)
-                    (return . decryptUntilClean body)
+processBackwardRelay :: OriginatedCircuit -> ByteString -> IO ()
+processBackwardRelay circ body =
+  do clearBody <- modifyMVar' (ocBackCryptoData circ) (decryptUntilClean body)
      case clearBody of
-       Nothing -> circSendUpstream circ (Relay circId body)
+       Nothing -> ocLog circ "Dropped upstream packet on originated circuit."
        Just x  -> processLocalBackwardsRelay circ x
  where
   decryptUntilClean :: ByteString -> [CryptoData] ->
@@ -290,20 +370,20 @@ processBackwardRelay circ circId body =
          Right (_, _, (x, h1')) ->
            (((encstate', h1') : rest), Just x)
 
-processLocalBackwardsRelay :: TorCircuit -> RelayCell -> IO ()
+processLocalBackwardsRelay :: OriginatedCircuit -> RelayCell -> IO ()
 processLocalBackwardsRelay circ x =
   case x of
     RelayData{ relayStreamId = strmId, relayData = bstr } ->
-      withMVar (circSockets circ) $ \ smap ->
+      withMVar (ocSockets circ) $ \ smap ->
         case Map.lookup strmId smap of
           Nothing ->
-            circLog circ ("Dropping traffic to unknown stream " ++ show strmId)
+            ocLog circ ("Dropping traffic to unknown stream " ++ show strmId)
           Just sock ->
             do state <- readMVar (tsState sock)
                unless (isJust state) $ writeChan (tsInChan sock) (Right bstr)
 
     RelayEnd{ relayStreamId = strmId, relayEndReason = rsn } ->
-       modifyMVar_ (circSockets circ) $ \ smap ->
+       modifyMVar_ (ocSockets circ) $ \ smap ->
          case Map.lookup strmId smap of
            Nothing ->
              return smap
@@ -313,10 +393,10 @@ processLocalBackwardsRelay circ x =
                 return (Map.delete strmId smap)
 
     RelayConnected{ relayStreamId = tsStreamId } ->
-      modifyMVar_ (circConnWaiters circ) $ \ cwaits ->
+      modifyMVar_ (ocConnWaiters circ) $ \ cwaits ->
         case Map.lookup tsStreamId cwaits of
           Nothing ->
-            do circLog circ ("CONNECTED without waiter?")
+            do ocLog circ ("CONNECTED without waiter?")
                return cwaits
           Just wait ->
             do let tsCircuit = circ
@@ -325,51 +405,265 @@ processLocalBackwardsRelay circ x =
                tsLeftover   <- newMVar S.empty
                tsReadWindow <- newMVar 500 -- See spec, 7.4, stream flow
                let sock = TorSocket { .. }
-               modifyMVar_ (circSockets circ) $ \ socks ->
+               modifyMVar_ (ocSockets circ) $ \ socks ->
                  return (Map.insert tsStreamId sock socks)
                _ <- tryPutMVar wait (Right sock)
                return (Map.delete tsStreamId cwaits)
 
     RelaySendMe {} ->
-      do circLog circ "SENDME"
+      do ocLog circ "SENDME"
          return ()
 
     RelayExtended {} ->
-      void $ tryPutMVar (circExtendWaiter circ) x
+      void $ tryPutMVar (ocExtendWaiter circ) x
 
     RelayTruncated {} ->
-      do circLog circ ("TRUNCATED: " ++ show (relayTruncatedRsn x))
+      do ocLog circ ("TRUNCATED: " ++ show (relayTruncatedRsn x))
          return () -- FIXME
 
     RelayDrop {} ->
       return ()
 
     RelayResolved { relayStreamId = strmId } ->
-      modifyMVar_ (circResolveWaiters circ) $ \ resolveds ->
+      modifyMVar_ (ocResolveWaiters circ) $ \ resolveds ->
         case Map.lookup strmId resolveds of
           Nothing ->
-            do circLog circ ("Resolved unknown request.")
+            do ocLog circ ("Resolved unknown request.")
                return resolveds
           Just wait ->
             do _ <- tryPutMVar wait (relayResolvedAddrs x)
                return (Map.delete strmId resolveds)
 
     RelayExtended2 {} ->
-      void $ tryPutMVar (circExtendWaiter circ) x
+      void $ tryPutMVar (ocExtendWaiter circ) x
 
     _ ->
-      circLog circ ("Unexpected relay cell on backward link.")
-
--- processForwardInput :: TorCircuit -> TorCell -> IO ()
--- processForwardInput = undefined
+      ocLog circ ("Unexpected relay cell on backward link.")
 
 -- ----------------------------------------------------------------------------
 
-resolveName :: TorCircuit -> String -> IO [(TorAddress, Word32)]
+processForwardInput :: HasBackend s =>
+                       TorNetworkStack ls s -> TransverseCircuit s -> TorCell ->
+                       IO ()
+processForwardInput ns circ cell =
+  handle logException $
+    case cell of
+      Relay      circId body -> processForwardRelay ns circ circId body
+      RelayEarly circId body -> processForwardRelay ns circ circId body
+      Destroy    _      rsn  -> destroyTransverse   ns circ rsn
+      _                      ->
+        tcLog circ ("Spurious message along circuit.")
+ where
+  logException e =
+    tcLog circ ("Caught exception processing backwards input: "
+                  ++ show (e :: SomeException))
+
+processForwardRelay :: HasBackend s =>
+                       TorNetworkStack ls s -> TransverseCircuit s ->
+                       Word32 -> ByteString ->
+                       IO ()
+processForwardRelay ns circ circId body =
+  do clearBody <- modifyMVar' (tcForeCryptoData circ) (decryptBody body)
+     case clearBody of
+       Left  body' ->
+         do mlink <- tryReadMVar (tcNextHop circ)
+            case mlink of
+              Nothing   -> return ()
+              Just link -> linkWrite link (Relay circId body')
+       Right x     -> processLocalForwardRelay ns circ x
+ where
+  decryptBody bstr (encstate, h1) =
+    let (bstr', encstate') = decryptData encstate bstr
+    in case runGetOrFail (parseRelayCell h1) (L.fromStrict bstr') of
+         Left _                 -> ((encstate', h1),  Left bstr')
+         Right (_, _, (x, h1')) -> ((encstate', h1'), Right x)
+
+processLocalForwardRelay :: HasBackend s =>
+                            TorNetworkStack ls s ->
+                            TransverseCircuit s -> RelayCell ->
+                            IO ()
+processLocalForwardRelay ns circ x =
+  case x of
+    RelayBegin{} | not (isExitNode circ) ->
+      circRelayUpstream circ (RelayEnd (relayStreamId x) ReasonTorProtocol)
+
+    RelayBegin{ relayStreamId = strmId } ->
+      -- FIXME: Figure out how to get TTLs from our network stacks.
+      void $ forkIO $
+        do eaddr <- getAddress' ns (relayBeginAddress x)
+           case eaddr of
+             [] ->
+               circRelayUpstream circ (RelayEnd strmId ReasonResolveFailed)
+             (f:_) | matchesExitCriteria f (relayBeginPort x) circ ->
+               do ms <- connect' ns f (relayBeginPort x)
+                  case ms of
+                    Nothing ->
+                      circRelayUpstream circ
+                        (RelayEnd strmId ReasonConnectionRefused)
+                    Just sock ->
+                      do modifyMVar_' (tcConnections circ) (Map.insert strmId sock)
+                         readThr <- forkIO $ transferData sock
+                         modifyMVar_' (tcThreads circ) (readThr :)
+                         circRelayUpstream circ (RelayConnected strmId f 600)
+             (f:_) ->
+               circRelayUpstream circ (RelayEnd strmId (ReasonExitPolicy f 600))
+     where
+      transferData sock =
+        do bstr <- recv ns sock 1024
+           if S.null bstr
+              then do close ns sock
+                      circRelayUpstream circ (RelayEnd strmId ReasonDone)
+              else do circRelayUpstream circ (RelayData strmId bstr)
+                      transferData sock
+
+    RelayData{ relayStreamId = strmId } ->
+      void $ forkIO $
+        do msock <- withMVar' (tcConnections circ) (Map.lookup strmId)
+           case msock of
+             Nothing -> tcLog circ "Ignoring write to unknown stream."
+             Just s  -> write ns s (L.fromStrict (relayData x))
+
+    RelayEnd{ relayStreamId = strmId } ->
+      do msock <- withMVar' (tcConnections circ) (Map.lookup strmId)
+         case msock of
+           Nothing -> tcLog circ "Ignoring end to unknown stream."
+           Just s  -> close ns s
+
+    RelaySendMe{} ->
+      return () -- FIXME
+
+    RelayExtend{ relayStreamId = strmId } ->
+      void $ forkIO $ handle abortExtend tryExtend
+     where
+      abortExtend :: SomeException -> IO ()
+      abortExtend _ = circRelayUpstream circ (RelayEnd strmId ReasonTorProtocol)
+      --
+      tryExtend =
+        do let target = [ExtendIP4 (relayExtendAddress x) (relayExtendPort x),
+                         ExtendDigest (relayExtendIdent x)]
+           tcLog circ ("Going to try to extending a circuit to " ++ show target)
+           Just desc <- findRouter (tcRouterDB circ) target
+           -- FIXME: Run this through the link manager, instead.
+           link <- initLink ns (tcCredentials circ) (tcRNG circ) (tcLog circ) desc
+           linkWrite link (Create (tcId circ) (relayExtendSkin x))
+           Created cid bstr <- linkRead link (tcId circ)
+           unless ((tcId circ == cid) && (S.length bstr == (128 + 20))) $
+             fail "Unacceptable response to extend CREATE message."
+           good <- tryPutMVar (tcNextHop circ) link
+           if good
+              then do circRelayUpstream circ (RelayExtended strmId bstr)
+                      tcLog circ "Circuit extension succeeded."
+                      forever $ do next <- linkRead link (tcId circ)
+                                   processBackwardTransverse circ next
+              else do tcLog circ "Duplicate extension. Failing."
+                      linkClose link
+                      fail "Duplicate extension."
+
+    RelayTruncate{} ->
+      void $ forkIO $
+        do mlink <- tryReadMVar (tcNextHop circ)
+           case mlink of
+             Nothing   -> return ()
+             Just link -> linkWrite link (Destroy (tcId circ) NoReason)
+           circRelayUpstream circ (RelayTruncated 0 NoReason)
+
+    RelayDrop{} ->
+      return ()
+
+    RelayResolve{} | not (isExitNode circ) ->
+      circRelayUpstream circ (RelayEnd (relayStreamId x) ReasonTorProtocol)
+
+    RelayResolve{ relayStreamId = strmId, relayResolveName = name } ->
+      void $ forkIO $
+        do resolve <- getAddress ns name
+           let results = map (\ a -> (a, 600)) resolve -- FIXME: TTLs!
+           circRelayUpstream circ (RelayResolved strmId results)
+
+    RelayBeginDir{ relayStreamId = strmId } ->
+      circRelayUpstream circ (RelayEnd strmId ReasonNotDirectory)
+
+    RelayExtend2{ relayStreamId = strmId } ->
+      void $ forkIO $ handle abortExtend tryExtend
+     where
+      abortExtend :: SomeException -> IO ()
+      abortExtend _ = circRelayUpstream circ (RelayEnd strmId ReasonTorProtocol)
+      --
+      tryExtend = -- FIXME: This is probably worth abstracting
+        do let target = relayExtendTarget x
+           tcLog circ ("Going to try to extending a circuit to " ++ show target)
+           Just desc <- findRouter (tcRouterDB circ) target
+           -- FIXME: Run this through the link manager, instead.
+           link <- initLink ns (tcCredentials circ) (tcRNG circ) (tcLog circ) desc
+           linkWrite link (Create2 (tcId circ) (relayExtendType x) (relayExtendSkin x))
+           Created2 cid bstr <- linkRead link (tcId circ)
+           unless ((tcId circ == cid) && (S.length bstr == (32 + 32))) $
+             fail "Unacceptable response to extend CREATE2 message."
+           good <- tryPutMVar (tcNextHop circ) link
+           if good
+              then do circRelayUpstream circ (RelayExtended2 strmId bstr)
+                      tcLog circ "Circuit extension succeeded."
+                      forever $ do next <- linkRead link (tcId circ)
+                                   processBackwardTransverse circ next
+              else do tcLog circ "Duplicate extension. Failing."
+                      linkClose link
+                      fail "Duplicate extension."
+
+    _ ->
+      tcLog circ ("Unexpected relay cell on backward link.")
+
+processBackwardTransverse :: TransverseCircuit s -> TorCell -> IO ()
+processBackwardTransverse circ cell =
+  case cell of
+    Relay      _ body -> process body
+    RelayEarly _ body -> process body
+    _ -> tcLog circ ("Got weird backwards transverse cell: " ++ show cell)
+ where
+   process body =
+     do body' <- modifyMVar' (tcBackCryptoData circ) (processBody body)
+        linkWrite (tcLink circ) (Relay (tcId circ) body')
+   processBody body (estate, hash) =
+     let (body', estate') = encryptData estate body
+     in ((estate', hash), body')
+
+isExitNode :: TransverseCircuit s -> Bool
+isExitNode = isJust . torExitOptions . tcOptions
+
+getAddress' :: TorNetworkStack ns s -> TorAddress -> IO [TorAddress]
+getAddress' ns addr =
+  case addr of
+    Hostname str -> getAddress ns str
+    IP4      _   -> return [addr]
+    IP6      _   -> return [addr]
+    _            -> return []
+
+connect' :: TorNetworkStack ns s -> TorAddress -> Word16 -> IO (Maybe s)
+connect' ns (IP4 a) p = connect ns a p
+connect' ns (IP6 a) p = connect ns a p
+connect' _  _       _ = return Nothing
+
+matchesExitCriteria :: TorAddress -> Word16 -> TransverseCircuit s -> Bool
+matchesExitCriteria addr port circ =
+  case torExitOptions (tcOptions circ) of
+    Nothing   -> False
+    Just opts -> allowsExit (torExitRules opts) addr port
+
+circRelayUpstream :: TransverseCircuit s -> RelayCell -> IO ()
+circRelayUpstream circ relay =
+  do cell <- modifyMVar' (tcBackCryptoData circ) synthesizeRelay
+     linkWrite (tcLink circ) (Relay (tcId circ) cell)
+ where
+  synthesizeRelay (estate, hash) =
+    let (bstr, hash')      = renderRelayCell hash relay
+        (encbstr, estate') = encryptData estate bstr
+    in ((estate', hash'), encbstr)
+
+-- ----------------------------------------------------------------------------
+
+resolveName :: OriginatedCircuit -> String -> IO [(TorAddress, Word32)]
 resolveName circ str =
   do strmId <- getNextStreamId circ
      resMV  <- newEmptyMVar
-     modifyMVar_ (circResolveWaiters circ) $ \ m ->
+     modifyMVar_ (ocResolveWaiters circ) $ \ m ->
        return (Map.insert strmId resMV m)
      writeCellOnCircuit circ (RelayResolve strmId str)
      takeMVar resMV
@@ -377,7 +671,7 @@ resolveName circ str =
 -- ----------------------------------------------------------------------------
 
 data TorSocket = TorSocket {
-       tsCircuit    :: TorCircuit
+       tsCircuit    :: OriginatedCircuit
      , tsStreamId   :: Word16
      , tsState      :: MVar (Maybe RelayEndReason)
      , tsReadWindow :: MVar Int
@@ -389,21 +683,21 @@ data TorSocket = TorSocket {
 -- is a connection that can be used to read, write, and close the connection.
 -- (This is equivalent to calling connectToHost' with True, True, and False for
 -- the extra arguments.)
-connectToHost :: TorCircuit -> TorAddress -> Word16 -> IO TorSocket
+connectToHost :: OriginatedCircuit -> TorAddress -> Word16 -> IO TorSocket
 connectToHost tc a p = connectToHost' tc a p True True False
 
 -- |Connect to the given address and port through the given circuit. The result
 -- is a connection that can be used to read, write, and close the connection.
 -- The booleans determine if an IPv4 connection is OK, an IPv6 connection is OK,
 -- and whether IPv6 is preferred, respectively.
-connectToHost' :: TorCircuit ->
+connectToHost' :: OriginatedCircuit ->
                   TorAddress -> Word16 ->
                   Bool -> Bool -> Bool ->
                   IO TorSocket
 connectToHost' circ addr port ip4ok ip6ok ip6pref =
   do strmId <- getNextStreamId circ
      resMV  <- newEmptyMVar
-     modifyMVar_ (circConnWaiters circ) $ \ m ->
+     modifyMVar_ (ocConnWaiters circ) $ \ m ->
        return (Map.insert strmId resMV m)
      writeCellOnCircuit circ (RelayBegin strmId addr port ip4ok ip6ok ip6pref)
      throwLeft =<< takeMVar resMV
@@ -472,7 +766,7 @@ torClose :: TorSocket -> RelayEndReason -> IO ()
 torClose sock reason =
   do let strmId = tsStreamId sock
      modifyMVar_ (tsState sock) (const (return (Just reason)))
-     modifyMVar_ (circSockets (tsCircuit sock)) (return . Map.delete strmId)
+     modifyMVar_' (ocSockets (tsCircuit sock)) (Map.delete strmId)
      writeCellOnCircuit (tsCircuit sock) (RelayEnd strmId reason)
 
 -- ----------------------------------------------------------------------------
@@ -509,11 +803,11 @@ xorBS a b = S.pack (S.zipWith xor a b)
 
 -- ----------------------------------------------------------------------------
 
-getNextStreamId :: TorCircuit -> IO Word16
+getNextStreamId :: OriginatedCircuit -> IO Word16
 getNextStreamId circ =
-  do nextId <- modifyMVar (circRNG circ) (return . randWord16)
+  do nextId <- modifyMVar' (ocRNG circ) randWord16
      let nextId' = fromIntegral nextId
-     good   <- modifyMVar (circTakenStreamIds circ) $ \ set ->
+     good   <- modifyMVar (ocTakenStreamIds circ) $ \ set ->
                  if IntSet.member nextId' set || nextId == 0
                     then return (set, False)
                     else return (IntSet.insert nextId' set, True)
@@ -590,27 +884,25 @@ startNTorHandshake router g0 =
   case routerNTorOnionKey router of
     Nothing ->
       (g0, Nothing)
-    Just keyid ->
+    Just key ->
       let (pair@(bigX, _), g1) = withDRG g0 generate25519
           nodeid = routerFingerprint router
           client_pk = convert bigX
-          bstr = S.concat [nodeid, keyid, client_pk]
+          bstr = S.concat [nodeid, convert key, client_pk]
       in (g1, Just (pair, bstr))
 
-advanceNTorHandshake :: RouterDesc -> Curve.SecretKey ->
+advanceNTorHandshake :: RouterDesc -> Curve.SecretKey -> Word32 ->
                         ByteString -> TorRNG ->
                         (TorRNG,
-                         Either String (ByteString, CryptoData, CryptoData))
-advanceNTorHandshake me littleB bstr0 g0
+                         Either String (TorCell, CryptoData, CryptoData))
+advanceNTorHandshake me littleB circId bstr0 g0
   | Nothing <- routerNTorOnionKey me =
       (g0, Left "Called advance, but I don't support NTor handshakes.")
-  | (nodeid /= routerFingerprint me) || (Just keyid /= routerNTorOnionKey me) =
+  | (nodeid /= routerFingerprint me) || (Just bigB /= routerNTorOnionKey me) =
       (g0, Left "Called advance, but their fingerprint doesn't match me.")
   | Left err <- publicKey keyid =
-      (g0, Left ("Couldn't decode bigB in advance: " ++ err))
-  | Left err <- publicKey keyid =
       (g0, Left ("Couldn't decode bigX in advance: " ++ err))
-  | otherwise = (g1, Right (outdata,fenc,benc))
+  | otherwise = (g1, Right (msg,fenc,benc))
  where
   (nodeid, bstr1)       = S.splitAt 20 bstr0
   (keyid,  xpub)        = S.splitAt 32 bstr1
@@ -628,6 +920,7 @@ advanceNTorHandshake me littleB bstr0 g0
   server_pk             = convert bigY
   auth                  = hmacSha256 t_mac auth_input
   --
+  msg                   = Created2 circId outdata
   outdata               = S.concat [server_pk, auth]
   (fenc, benc)          = computeNTorValues key_seed
 
@@ -707,56 +1000,13 @@ t_key                 = protoid `S.append` S8.pack ":key_extract"
 t_verify              = protoid `S.append` S8.pack ":verify"
 m_expand              = protoid `S.append` S8.pack ":key_expand"
 
--- -- -----------------------------------------------------------------------------
--- 
--- -- This handler is called when we receive data from an earlier link in the
--- -- circuit. Thus, traffic we receive is moving forward through the network.
--- _forwardRelayHandler :: (String -> IO ()) -> TorRelay -> TorCell -> IO ()
--- _forwardRelayHandler llog circ cell =
---   case cell of
---     Relay _ body      -> forwardRelay Relay      body
---     RelayEarly _ body -> forwardRelay RelayEarly body
---     Destroy _ reason  -> llog ("Relay destroyed: " ++ show reason)
---     _                 -> llog ("Spurious message across relay.")
---  where
---   forwardRelay builder body =
---     do (encstate, hashstate) <- takeMVar (relayForwardCryptoData circ)
---        let (body', encstate') = decryptData encstate body
---        case runGetOrFail (parseRelayCell hashstate) (L.fromStrict body') of
---          Left _ ->
---            do putMVar (relayForwardCryptoData circ) (encstate', hashstate)
---               forward builder body'
---          Right (_, _, (x, hashstate')) ->
---            do putMVar (relayForwardCryptoData circ) (encstate', hashstate')
---               process x
---   --
---   forward builder bstr =
---     do fstate <- takeMVar (relayForwardStates circ)
---        case fstate of
---          ForwardLink{} ->
---             do linkWrite (flLink fstate) (builder (flCircuitId fstate) bstr)
---                putMVar (relayForwardStates circ) fstate
---          ForwardExtending{} ->
---             do putMVar (relayForwardStates circ) ForwardDeadEnd
---                let dst = Destroy (relayBackwardCircId circ) TorProtocolViolation
---                linkWrite (relayBackwardLink circ) dst
---                --endCircuit (relayBackwardLink circ) (relayBackwardCircId circ)
---          ForwardExit{} ->
---             do putMVar (relayForwardStates circ) ForwardDeadEnd
---                let dst = Destroy (relayBackwardCircId circ) TorProtocolViolation
---                linkWrite (relayBackwardLink circ) dst
---                --endCircuit (relayBackwardLink circ) (relayBackwardCircId circ)
---          ForwardDeadEnd ->
---             return ()
---   --
---   process RelayBegin{}    = putStrLn "RELAY_BEGIN"
---   process RelayData{}     = putStrLn "RELAY_DATA"
---   process RelayEnd{}      = putStrLn "RELAY_END"
---   process RelayExtend{}   = putStrLn "RELAY_DATA"
---   process RelayTruncate{} = putStrLn "RELAY_TRUNCATE"
---   process RelayDrop{}     = putStrLn "RELAY_DROP"
---   process RelayResolve{}  = putStrLn "RELAY_RESOLVE"
---   process RelayExtend2{}  = putStrLn "RELAY_EXTEND2"
---   process _               = return ()
--- 
+-- -----------------------------------------------------------------------------
 
+withMVar' :: MVar a -> (a -> b) -> IO b
+withMVar' mv f = withMVar mv (return . f)
+
+modifyMVar' :: MVar a -> (a -> (a, b)) -> IO b
+modifyMVar' mv f = modifyMVar mv (return . f)
+
+modifyMVar_' :: MVar a -> (a -> a) -> IO ()
+modifyMVar_' mv f = modifyMVar_ mv (return . f)
