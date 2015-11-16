@@ -16,14 +16,15 @@ import Tor.NetworkStack
 
 systemNetworkStack :: TorNetworkStack Socket Socket
 systemNetworkStack = TorNetworkStack {
-    Tor.NetworkStack.connect = systemConnect
-  , Tor.NetworkStack.listen  = systemListen
-  , Tor.NetworkStack.accept  = systemAccept
-  , Tor.NetworkStack.recv    = systemRead
-  , Tor.NetworkStack.write   = sendAll
-  , Tor.NetworkStack.flush   = const (return ())
-  , Tor.NetworkStack.close   = Sys.close
-  , Tor.NetworkStack.lclose  = Sys.close
+    Tor.NetworkStack.connect    = systemConnect
+  , Tor.NetworkStack.getAddress = systemLookup
+  , Tor.NetworkStack.listen     = systemListen
+  , Tor.NetworkStack.accept     = systemAccept
+  , Tor.NetworkStack.recv       = systemRead
+  , Tor.NetworkStack.write      = sendAll
+  , Tor.NetworkStack.flush      = const (return ())
+  , Tor.NetworkStack.close      = Sys.close
+  , Tor.NetworkStack.lclose     = Sys.close
   }
 
 systemConnect :: String -> Word16 -> IO (Maybe Socket)
@@ -39,23 +40,27 @@ systemConnect addrStr port =
             Sys.connect sock (addrAddress x)
             return (Just sock)
 
+systemLookup :: String -> IO [TorAddress]
+systemLookup hostname =
+  -- FIXME: Tack the hostname on the end, as a default?
+  do res <- getAddrInfo Nothing (Just hostname) Nothing
+     return (map (convertAddress . addrAddress) res)
+
 systemListen :: Word16 -> IO Socket
 systemListen port = listenOn (PortNumber (fromIntegral port))
+
+convertAddress :: SockAddr -> TorAddress
+convertAddress (SockAddrInet _ x) =
+  IP4 (ip4ToString (toStrict (runPut (putWord32be x))))
+convertAddress (SockAddrInet6 _ _ (a,b,c,d) _) =
+  IP6 (ip6ToString (toStrict (runPut (mapM_ putWord32be [a,b,c,d]))))
+convertAddress x =
+  error ("Incompatible address type: " ++ show x)
 
 systemAccept :: Socket -> IO (Socket, TorAddress)
 systemAccept lsock =
   do (res, addr) <- Sys.accept lsock
-     case addr of
-       SockAddrInet _ addr' ->
-         let bstr = toStrict (runPut (putWord32be addr'))
-         in return (res, IP4 (ip4ToString bstr))
-       SockAddrInet6 _ _ (a,b,c,d) _ ->
-         let bstr = toStrict (runPut (mapM_ putWord32be [a,b,c,d]))
-         in return (res, IP6 (ip6ToString bstr))
-       SockAddrUnix  _          -> fail "Unix socket? BAD."
-#if MIN_VERSION_network(2,6,1)
-       SockAddrCan   _          -> fail "CAN socket? BAD."
-#endif
+     return (res, convertAddress addr)
 
 systemRead :: Socket -> Int -> IO ByteString
 systemRead _    0   = return BS.empty

@@ -3,6 +3,7 @@ module Tor.DataFormat.TorAddress(
        , unTorAddress
        , torAddressByteString
        , ip4ToString, ip6ToString
+       , putIP4String, putIP6String
        )
  where
 
@@ -23,7 +24,7 @@ data TorAddress = Hostname String
                 | IP6 String
                 | TransientError String
                 | NontransientError String
- deriving (Eq, Show)
+ deriving (Eq, Ord, Show)
 
 unTorAddress :: TorAddress -> String
 unTorAddress (Hostname s) = s
@@ -68,23 +69,30 @@ putTorAddress (Hostname str) =
      putWord8 (fromIntegral (BS.length bstr))
      putByteString bstr
 putTorAddress (IP4 str) =
-  do putWord8 0x04
-     putWord8 4
-     forM_ (unintercalate '.' str) (putWord8 . read)
+  do putWord8     0x04
+     putWord8     4
+     putIP4String str
 putTorAddress (IP6 str) =
   do putWord8 0x06
      putWord8 16
-     let str' = unwrapIP6 str
-     forM_ (unintercalate ':' str') $ \ v ->
-       case readHex v of
-        []        -> fail "Couldn't read IP6 address component."
-        ((x,_):_) -> putWord16be x
+     putIP6String str
 putTorAddress (TransientError _) =
   do putWord8 0xF0
      putWord8 0
 putTorAddress (NontransientError _) =
   do putWord8 0xF1
      putWord8 0
+
+putIP4String :: String -> Put
+putIP4String str = forM_ (unintercalate '.' str) (putWord8 . read)
+
+putIP6String :: String -> Put
+putIP6String str =
+  do let str' = unwrapIP6 str
+     forM_ (unintercalate ':' str') $ \ v ->
+       case readHex v of
+        []        -> fail "Couldn't read IP6 address component."
+        ((x,_):_) -> putWord16be x
 
 torAddressByteString :: TorAddress -> ByteString
 torAddressByteString (IP4 x) = 

@@ -1,7 +1,6 @@
 module Tor.State.LinkManager(
          LinkManager
        , newLinkManager
-       , getLocalAddresses
        , newLinkCircuit
        , setIncomingLinkHandler
        )
@@ -13,7 +12,6 @@ import Crypto.Random
 import Data.Maybe
 import Data.Word
 import Network.TLS hiding (Credentials)
-import Tor.DataFormat.TorAddress
 import Tor.Link
 import Tor.NetworkStack
 import Tor.Options
@@ -29,7 +27,6 @@ data HasBackend s => LinkManager ls s = LinkManager {
      , lmIdealLinks          :: Int
      , lmMaxLinks            :: Int
      , lmLog                 :: String -> IO ()
-     , lmAddresses           :: MVar [TorAddress]
      , lmRNG                 :: MVar TorRNG
      , lmLinks               :: MVar [TorLink]
      , lmIncomingLinkHandler :: MVar (TorLink -> IO ())
@@ -41,8 +38,7 @@ newLinkManager :: HasBackend s =>
                   RouterDB -> Credentials ->
                   IO (LinkManager ls s)
 newLinkManager o ns routerDB creds =
-  do addrsMV   <- newMVar []
-     rngMV     <- newMVar =<< drgNew
+  do rngMV     <- newMVar =<< drgNew
      linksMV   <- newMVar []
      ilHndlrMV <- newMVar (const (return ()))
      let lm = LinkManager {
@@ -52,7 +48,6 @@ newLinkManager o ns routerDB creds =
               , lmIdealLinks          = idealLinks
               , lmMaxLinks            = maxLinks
               , lmLog                 = torLog o
-              , lmAddresses           = addrsMV
               , lmRNG                 = rngMV
               , lmLinks               = linksMV
               , lmIncomingLinkHandler = ilHndlrMV
@@ -63,8 +58,7 @@ newLinkManager o ns routerDB creds =
           forkIO_ $ forever $
             do (sock, addr) <- accept ns lsock
                forkIO_ $
-                 do link <- acceptLink creds routerDB rngMV addrsMV
-                                       (torLog o) sock addr
+                 do link <- acceptLink creds routerDB rngMV (torLog o) sock addr
                     modifyMVar_ linksMV (return . (link:))
      return lm
  where
@@ -73,9 +67,6 @@ newLinkManager o ns routerDB creds =
   orPort     = maybe 9374 torOnionPort (torRelayOptions o)
   idealLinks = maybe 3 torTargetLinks (torEntranceOptions o)
   maxLinks   = maybe 3 torMaximumLinks (torRelayOptions o)
-
-getLocalAddresses :: HasBackend s => LinkManager ls s -> IO [TorAddress]
-getLocalAddresses = readMVar . lmAddresses
 
 newLinkCircuit :: HasBackend s =>
                   LinkManager ls s -> [RouterRestriction] ->
@@ -103,7 +94,7 @@ newLinkCircuit lm restricts =
     do entranceDesc <- modifyMVar (lmRNG lm)
                          (getRouter (lmRouterDB lm) restricts)
        link         <- initLink (lmNetworkStack lm) (lmCredentials lm)
-                         (lmRNG lm) (lmAddresses lm) (lmLog lm)
+                         (lmRNG lm) (lmLog lm)
                          entranceDesc
        circId       <- modifyMVar (lmRNG lm) (linkNewCircuitId link)
        return (curLinks ++ [link], (link, entranceDesc, circId))

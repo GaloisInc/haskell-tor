@@ -7,6 +7,7 @@ module Tor.DataFormat.RouterDesc(
 
 import Control.Applicative
 import Crypto.Hash.Easy
+import qualified Crypto.PubKey.Curve25519 as Curve
 import Crypto.PubKey.RSA.PKCS15
 import Data.Attoparsec.ByteString
 import Data.ByteString(ByteString)
@@ -302,8 +303,10 @@ ntorOnionKey :: RouterDesc -> Parser RouterDesc
 ntorOnionKey r =
   do _ <- string "ntor-onion-key"
      _ <- whitespace
-     k <- decodeBase64 =<< manyTill base64Char newline
-     return r{ routerNTorOnionKey = Just k }
+     x <- decodeBase64 =<< manyTill base64Char newline
+     case Curve.publicKey x of
+       Left err -> fail ("Failure decoding curve25519 public key: " ++ err)
+       Right k  -> return r{ routerNTorOnionKey = Just k }
 
 signingKey :: RouterDesc -> Parser RouterDesc
 signingKey r =
@@ -367,14 +370,14 @@ family r =
        d <- hexDigest
        _ <- char8 '='
        n <- nickname
-       return (Just d, Just n)
+       return (NodeFamilyBoth n d)
   digestWithoutName =
     do _ <- char8 '$'
        d <- hexDigest
-       return (Just d, Nothing)
+       return (NodeFamilyDigest d)
   nameWithoutDigest =
     do n <- nickname
-       return (Nothing, Just n)
+       return (NodeFamilyNickname n)
 
 readHistory :: RouterDesc -> Parser RouterDesc
 readHistory r =

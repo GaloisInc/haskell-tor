@@ -46,14 +46,14 @@ data RelayCell =
                                , relayConnectedTTL   :: Word32 }
   | RelaySendMe                { relayStreamId       :: Word16 }
   | RelayExtend                { relayStreamId       :: Word16
-                               , relayExtendAddress  :: TorAddress
+                               , relayExtendAddress  :: String -- ^ IPv4
                                , relayExtendPort     :: Word16
                                , relayExtendSkin     :: ByteString
                                , relayExtendIdent    :: ByteString }
   | RelayExtended              { relayStreamId       :: Word16
                                , relayExtendedData   :: ByteString }
   | RelayTruncate              { relayStreamId       :: Word16 }
-  | RelayTruncated             { relayStreamId       :: Word16 
+  | RelayTruncated             { relayStreamId       :: Word16
                                , relayTruncatedRsn   :: DestroyReason }
   | RelayDrop                  { relayStreamId       :: Word16 }
   | RelayResolve               { relayStreamId       :: Word16
@@ -63,7 +63,7 @@ data RelayCell =
   | RelayBeginDir              { relayStreamId       :: Word16 }
   | RelayExtend2               { relayStreamId       :: Word16
                                , relayExtendTarget   :: [ExtendSpec]
-                               , relayExtendType     :: Word16
+                               , relayExtendType     :: HandshakeType
                                , relayExtendData     :: ByteString }
   | RelayExtended2             { relayStreamId       :: Word16
                                , relayExtendedData   :: ByteString }
@@ -143,7 +143,7 @@ getRelayCell =
                           ttl <- getWord32be
                           return (digest, RelayConnected strmId (IP6 ip6ad) ttl)
        5 -> return (digest, RelaySendMe strmId)
-       6 -> do addr <- (IP4 . ip4ToString) <$> getByteString 4
+       6 -> do addr <- ip4ToString <$> getByteString 4
                port <- getWord16be
                skin <- getByteString (128 + 16 + 42) -- TAP_C_HANDSHAKE_LEN
                idfp <- getByteString 20 -- HASH_LEN
@@ -164,7 +164,7 @@ getRelayCell =
        13 -> return (digest, RelayBeginDir strmId)
        14 -> do nspec <- getWord8
                 specs <- replicateM (fromIntegral nspec) getExtendSpec
-                htype <- getWord16be
+                htype <- getHandshakeType
                 hlen  <- getWord16be
                 hdata <- getByteString (fromIntegral hlen)
                 return (digest, RelayExtend2 strmId specs htype hdata)
@@ -276,7 +276,7 @@ putRelayCellGuts x@RelayConnected{} =
 putRelayCellGuts   RelaySendMe{} =
   return 5
 putRelayCellGuts x@RelayExtend{} =
-  do putByteString     (torAddressByteString (relayExtendAddress x))
+  do putIP4String      (relayExtendAddress x)
      putWord16be       (relayExtendPort x)
      putByteString     (relayExtendSkin x)
      putByteString     (relayExtendIdent x)
@@ -305,7 +305,7 @@ putRelayCellGuts   RelayBeginDir{} =
 putRelayCellGuts x@RelayExtend2{} =
   do putWord8 (fromIntegral (length (relayExtendTarget x)))
      forM_ (relayExtendTarget x) putExtendSpec
-     putWord16be (relayExtendType x)
+     putHandshakeType (relayExtendType x)
      putWord16be (fromIntegral (BS.length (relayExtendData x)))
      putByteString     (relayExtendData x)
      return 14
@@ -453,8 +453,8 @@ putRelayEndReason ReasonNotDirectory        = putWord8 14
 
 -- -----------------------------------------------------------------------------
 
-data ExtendSpec = ExtendIP4    ByteString Word16
-                | ExtendIP6    ByteString Word16
+data ExtendSpec = ExtendIP4    String     Word16
+                | ExtendIP6    String     Word16
                 | ExtendDigest ByteString
  deriving (Eq, Show)
 
@@ -462,12 +462,12 @@ putExtendSpec :: ExtendSpec -> Put
 putExtendSpec (ExtendIP4 addr port) =
   do putWord8          0x00
      putWord8          (4 + 2)
-     putByteString     addr
+     putIP4String      addr
      putWord16be       port
 putExtendSpec (ExtendIP6 addr port) =
   do putWord8          0x01
      putWord8          (16 + 2)
-     putByteString     addr
+     putIP6String      addr
      putWord16be       port
 putExtendSpec (ExtendDigest hash) =
   do putWord8          0x02
@@ -481,10 +481,10 @@ getExtendSpec =
      case (lstype, lslen) of
        (0x00,  6) -> do addr <- getByteString 4
                         port <- getWord16be
-                        return (ExtendIP4 addr port)
+                        return (ExtendIP4 (ip4ToString addr) port)
        (0x01, 18) -> do addr <- getByteString 16
                         port <- getWord16be
-                        return (ExtendIP6 addr port)
+                        return (ExtendIP6 (ip6ToString addr) port)
        (0x02, 20) -> do hash <- getByteString 20
                         return (ExtendDigest hash)
        (_,     _) -> fail "Invalid LSTYPE / LSLEN combination."

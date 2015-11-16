@@ -23,6 +23,44 @@ import Tor.NetworkStack.Hans
 import Tor.NetworkStack.System
 #endif
 
+import qualified Data.ByteString as S
+import Tor.Link
+import Tor.Circuit
+import Tor.State.Credentials
+import Control.Concurrent
+import Crypto.Random
+import Tor.RouterDesc
+import Tor.DataFormat.Helpers
+import Tor.State.Directories
+import Tor.State.Routers
+
+--main :: IO ()
+--main = runDefaultMain $ \ flags ->
+--  do rngMV <- newMVar =<< drgNew
+--     addrsMV <- newMVar []
+--     (MkNS ns, logger) <- initializeSystem flags
+----      dirdb <- newDirectoryDatabase ns logger
+----      db <- newRouterDatabase ns dirdb logger
+--     creds <- newCredentials logger
+--     [_,printAscii] <- words `fmap` readFile "/Users/awick/.tor/fingerprint"
+--     keyfile <- S.readFile "/Users/awick/.tor/keys/secret_onion_key_ntor"
+--     let target = blankRouterDesc { routerIPv4Address  = "10.0.1.27"
+--                                  , routerORPort       = 9001
+--                                  , routerFingerprint  = readHex printAscii
+--                                  , routerNTorOnionKey = Just (S.drop 64 keyfile)
+--                                  }
+----     second <- modifyMVar rngMV (getRouter db [])
+----     third <- modifyMVar rngMV (getRouter db [])
+--     link <- initLink ns creds rngMV addrsMV logger target
+--     circId <- modifyMVar rngMV (linkNewCircuitId link)
+--     circ <- createCircuit rngMV logger link target circId
+----     extendCircuit circ second
+----     putStrLn "Done."
+----     extendCircuit circ third
+----     putStrLn "Done."
+--     foo <- resolveName circ "galois.com"
+--     putStrLn ("Foo: " ++ show foo)
+
 main :: IO ()
 main = runDefaultMain $ \ flags ->
   do (MkNS ns, logger)  <- initializeSystem flags
@@ -41,11 +79,8 @@ main = runDefaultMain $ \ flags ->
          putStrLn ("Could not resolve www.whatismypublicip.com!")
        ((addr, _ttl) : _) ->
          do sock <- torConnect tor addr 80
-            putStrLn ("Connected to " ++ show addr)
-            torWrite sock (buildGet "http://uhsure.com/")
-            putStrLn ("Wrote GET request.")
+            torWrite sock (buildGet "/")
             resp <- readLoop sock
-            putStrLn ("Response: " ++ show resp)
             torClose sock ReasonDone
 
 buildGet :: String -> ByteString
@@ -61,8 +96,7 @@ readLoop sock =
   do next <- torRead sock 256
      if L.length next < 256
         then return next
-        else do putStrLn ("Read chunk: " ++ show next)
-                rest <- readLoop sock
+        else do rest <- readLoop sock
                 return (next `L.append` rest)
 
 -- -----------------------------------------------------------------------------

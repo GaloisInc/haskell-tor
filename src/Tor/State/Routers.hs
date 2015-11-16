@@ -6,6 +6,7 @@ module Tor.State.Routers(
        , findRouter
        , getRouter
        , meetsRestrictions
+       , allowsExit
        )
  where
 
@@ -34,6 +35,7 @@ import Data.Maybe
 import Data.Word
 import MonadLib
 import Tor.DataFormat.Consensus
+import Tor.DataFormat.RelayCell
 import Tor.DataFormat.TorAddress
 import Tor.NetworkStack
 import Tor.NetworkStack.Fetch
@@ -69,11 +71,19 @@ newRouterDatabase ns ddb logMsg =
      return (RouterDB rdbMV)
 
 -- |Find a router given its fingerprint.
-findRouter :: RouterDB -> ByteString -> IO (Maybe RouterDesc)
-findRouter (RouterDB routerDB) fprint =
-  (find fingerprintEq . rdbRouters) `fmap` readMVar routerDB
+findRouter :: RouterDB -> [ExtendSpec] -> IO (Maybe RouterDesc)
+findRouter (RouterDB routerDB) specs =
+  (find matchesSpecs . rdbRouters) `fmap` readMVar routerDB
  where
-  fingerprintEq x = keyHash' sha256 (routerSigningKey x) == fprint
+  matchesSpecs x = any (matchSpec x) specs
+  --
+  matchSpec r (ExtendIP4 x p) =
+       ((routerIPv4Address r) == x && (routerORPort r) == p)
+    || ((x,p) `elem` (routerAlternateORAddresses r))
+  matchSpec r (ExtendIP6 x p) =
+    (x,p) `elem` (routerAlternateORAddresses r)
+  matchSpec r (ExtendDigest x) =
+    x == keyHash' sha256 (routerSigningKey r)
 
 -- |Fetch a router matching the given restrictions. The restrictions list should
 -- be thought of an "AND" with a default of True given the empty list. This
@@ -121,56 +131,73 @@ meetsRestrictions rtr (r:rest) =
   --
   allowsExits (ExitRuleReject AddrSpecAll PortSpecAll : _) = False
   allowsExits _ = True
-  --
-  allowsExit [] _ _ = True -- "if no rule matches, the address wil be accepted"
-  allowsExit (ExitRuleAccept addrrule portrule : rrest) addr port
-    | addrMatches addr addrrule && portMatches port portrule = True
-    | otherwise = allowsExit rrest addr port
-  allowsExit (ExitRuleReject addrrule portrule : rrest) addr port
-    | addrMatches addr addrrule && portMatches port portrule = False
-    | otherwise = allowsExit rrest addr port
-  --
-  portMatches _ PortSpecAll           = True
-  portMatches p (PortSpecRange p1 p2) = (p >= p1) && (p <= p2)
-  portMatches p (PortSpecSingle p')   = p == p'
-  --
-  addrMatches :: TorAddress -> AddrSpec -> Bool
-  addrMatches (Hostname _)          _                     = False
-  addrMatches (TransientError _)    _                     = False
-  addrMatches (NontransientError _) _                     = False
-  addrMatches _                     AddrSpecAll           = True
-  addrMatches (IP4 addr)            (AddrSpecIP4 addr')   = addr == addr'
-  addrMatches (IP4 addr)            (AddrSpecIP4Mask a m) = ip4in' addr a m
-  addrMatches (IP4 addr)            (AddrSpecIP4Bits a b) = ip4in  addr a b
-  addrMatches (IP4 _)               (AddrSpecIP6 _)       = False
-  addrMatches (IP4 _)               (AddrSpecIP6Bits _ _) = False
-  addrMatches (IP6 _)               (AddrSpecIP4 _)       = False
-  addrMatches (IP6 _)               (AddrSpecIP4Mask _ _) = False
-  addrMatches (IP6 _)               (AddrSpecIP4Bits _ _) = False
-  addrMatches (IP6 addr)            (AddrSpecIP6 addr')   = addr `ip6eq` addr'
-  addrMatches (IP6 addr)            (AddrSpecIP6Bits a b) = ip6in addr a b
-  --
-  ip4in' addr addr' mask =
-     masked (unAddr IP4 addr) mask' == masked (unAddr IP4 addr') mask'
-    where mask' = generateMaskFromMask mask
-  ip4in  addr addr' bits =
-     masked (unAddr IP4 addr) mask == masked (unAddr IP4 addr') mask
-    where mask  = generateMaskFromBits bits 4
-  ip6in  addr addr' bits =
-     masked (unAddr IP6 addr) mask == masked (unAddr IP6 addr') mask
-    where mask  = generateMaskFromBits bits 16
-  ip6eq  addr1 addr2 = expandIPv6 addr1 == expandIPv6 addr2
-  --
-  unAddr b = unpack . torAddressByteString . b
-  generateMaskFromMask x = unAddr IP4 x
-  generateMaskFromBits :: Int -> Int -> [Word8]
-  generateMaskFromBits bits len
-    | len == 0  = []
-    | bits == 0 = 0   : generateMaskFromBits bits       (len - 1)
-    | bits >= 8 = 255 : generateMaskFromBits (bits - 8) (len - 1)
-    | otherwise = (255 `shiftL` (8 - len)) : generateMaskFromBits 0 (len - 1)
-  masked a m = zipWith xor a m
-  expandIPv6 = unAddr IP6
+
+allowsExit :: [ExitRule] -> TorAddress -> Word16 -> Bool
+allowsExit [] _ _ = True -- "if no rule matches, the address wil be accepted"
+allowsExit (ExitRuleAccept addrrule portrule : rrest) addr port
+  | addrMatches addr addrrule && portMatches port portrule = True
+  | otherwise = allowsExit rrest addr port
+allowsExit (ExitRuleReject addrrule portrule : rrest) addr port
+  | addrMatches addr addrrule && portMatches port portrule = False
+  | otherwise = allowsExit rrest addr port
+
+portMatches :: Word16 -> PortSpec -> Bool
+portMatches _ PortSpecAll           = True
+portMatches p (PortSpecRange p1 p2) = (p >= p1) && (p <= p2)
+portMatches p (PortSpecSingle p')   = p == p'
+
+addrMatches :: TorAddress -> AddrSpec -> Bool
+addrMatches (Hostname _)          _                     = False
+addrMatches (TransientError _)    _                     = False
+addrMatches (NontransientError _) _                     = False
+addrMatches _                     AddrSpecAll           = True
+addrMatches (IP4 addr)            (AddrSpecIP4 addr')   = addr == addr'
+addrMatches (IP4 addr)            (AddrSpecIP4Mask a m) = ip4in' addr a m
+addrMatches (IP4 addr)            (AddrSpecIP4Bits a b) = ip4in  addr a b
+addrMatches (IP4 _)               (AddrSpecIP6 _)       = False
+addrMatches (IP4 _)               (AddrSpecIP6Bits _ _) = False
+addrMatches (IP6 _)               (AddrSpecIP4 _)       = False
+addrMatches (IP6 _)               (AddrSpecIP4Mask _ _) = False
+addrMatches (IP6 _)               (AddrSpecIP4Bits _ _) = False
+addrMatches (IP6 addr)            (AddrSpecIP6 addr')   = addr `ip6eq` addr'
+addrMatches (IP6 addr)            (AddrSpecIP6Bits a b) = ip6in addr a b
+
+ip4in' :: String -> String -> String -> Bool
+ip4in' addr addr' mask =
+   masked (unAddr IP4 addr) mask' == masked (unAddr IP4 addr') mask'
+  where mask' = generateMaskFromMask mask
+
+ip4in :: String -> String -> Int -> Bool
+ip4in  addr addr' bits =
+   masked (unAddr IP4 addr) mask == masked (unAddr IP4 addr') mask
+  where mask  = generateMaskFromBits bits 4
+
+ip6in :: String -> String -> Int -> Bool
+ip6in  addr addr' bits =
+   masked (unAddr IP6 addr) mask == masked (unAddr IP6 addr') mask
+  where mask  = generateMaskFromBits bits 16
+
+ip6eq :: String -> String -> Bool
+ip6eq  addr1 addr2 = expandIPv6 addr1 == expandIPv6 addr2
+
+unAddr :: (a -> TorAddress) -> a -> [Word8]
+unAddr b = unpack . torAddressByteString . b
+
+generateMaskFromMask :: String -> [Word8]
+generateMaskFromMask x = unAddr IP4 x
+
+generateMaskFromBits :: Int -> Int -> [Word8]
+generateMaskFromBits bits len
+  | len == 0  = []
+  | bits == 0 = 0   : generateMaskFromBits bits       (len - 1)
+  | bits >= 8 = 255 : generateMaskFromBits (bits - 8) (len - 1)
+  | otherwise = (255 `shiftL` (8 - len)) : generateMaskFromBits 0 (len - 1)
+
+masked :: Bits a => [a] -> [a] -> [a]
+masked a m = zipWith xor a m
+
+expandIPv6 :: String -> [Word8]
+expandIPv6 = unAddr IP6
 
 -- |The thread that updates the consensus document over time.
 updateConsensus :: TorNetworkStack ls s ->

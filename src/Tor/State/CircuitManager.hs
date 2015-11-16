@@ -15,9 +15,12 @@ import Network.TLS(HasBackend)
 import System.Mem.Weak
 import Tor.Circuit
 import Tor.DataFormat.TorCell
+import Tor.Link
+import Tor.NetworkStack
 import Tor.Options
 import Tor.RNG
 import Tor.RouterDesc
+import Tor.State.Credentials
 import Tor.State.LinkManager
 import Tor.State.Routers
 
@@ -26,36 +29,48 @@ data HasBackend s => CircuitManager ls s
        | CircuitManager {
            cmCircuitLength :: Int
          , cmRouterDB      :: RouterDB
-         , cmLog           :: String -> IO ()
+         , cmOptions       :: TorOptions
          , cmLinkManager   :: LinkManager ls s
          , cmRNG           :: MVar TorRNG
-         , cmOpenCircuits  :: MVar [CircuitEntry]
+         , cmOpenCircuits  :: MVar [CircuitEntry s]
          }
 
-data CircuitEntry = Pending {
-                      ceExitNode        :: RouterDesc
-                    , _cePendingEntrance :: Async TorCircuit
-                    }
-                  | Entry {
-                      ceExitNode        :: RouterDesc
-                    , _ceWeakEntrance    :: Weak TorCircuit
-                    }
+data CircuitEntry s = Pending {
+                        ceExitNode         :: RouterDesc
+                      , _cePendingEntrance :: Async OriginatedCircuit
+                      }
+                    | Entry {
+                        ceExitNode         :: RouterDesc
+                      , _ceWeakEntrance    :: Weak OriginatedCircuit
+                      }
+                    | Transverse {
+                        _ceIncomingLink    :: TorLink
+                      , _ceCircuit         :: Weak (TransverseCircuit s)
+                      }
 
 newCircuitManager :: HasBackend s =>
-                     TorOptions -> RouterDB -> LinkManager ls s ->
+                     TorOptions -> TorNetworkStack ls s ->
+                     Credentials -> RouterDB -> LinkManager ls s ->
                      IO (CircuitManager ls s)
-newCircuitManager opts rdb lm =
+newCircuitManager opts ns creds rdb lm =
   case torEntranceOptions opts of
     Nothing      -> return NoCircuitManager
     Just entOpts ->
       do let circLen = torInternalCircuitLength entOpts
          rngMV  <- newMVar =<< drgNew
          circMV <- newMVar []
-         let cm = CircuitManager circLen rdb (torLog opts) lm rngMV circMV
+         let cm = CircuitManager circLen rdb opts lm rngMV circMV
          setIncomingLinkHandler lm $ \ link ->
            handle logException $
-             do _circuit <- acceptCircuit link
-                torLog opts ("HANDLE INCOMING CIRCUIT FIXME")
+             do me <- getRouterDesc creds
+                mcircuit <- acceptCircuit ns opts me creds rdb link rngMV
+                case mcircuit of
+                  Nothing ->
+                    torLog opts ("Failed to build transverse circuit.")
+                  Just circuit ->
+                    do wkCircuit <- mkWeakPtr circuit Nothing
+                       let circ = Transverse link wkCircuit
+                       modifyMVar_ circMV $ \ circs -> return (circ : circs)
          return cm
  where
   logException e = torLog opts ("Exception creating incoming circuit: " ++
@@ -65,7 +80,7 @@ newCircuitManager opts rdb lm =
 -- host and port.
 openCircuit :: HasBackend s =>
                CircuitManager ls s -> [RouterRestriction] ->
-               IO TorCircuit
+               IO OriginatedCircuit
 openCircuit NoCircuitManager _ = fail "This node doesn't support entrance."
 openCircuit cm restricts =
   join $ modifyMVar (cmOpenCircuits cm) $ \ circs ->
@@ -85,6 +100,8 @@ openCircuit cm restricts =
                return (rest, openCircuit cm restricts)
              Just res ->
                return (snoc rest ent, return res)
+      _ ->
+        fail "Serious internal error (openCircuit)"
  where
   findApplicable ls = loop ls []
    where
@@ -93,7 +110,6 @@ openCircuit cm restricts =
       | ceExitNode x `meetsRestrictions` restricts = Just (x, rest ++ acc)
       | otherwise                                  = loop rest (snoc acc x)
   --
-  waitAndUpdate :: RouterDesc -> Async TorCircuit -> IO TorCircuit
   waitAndUpdate exitNode pendRes =
     do eres <- waitCatch pendRes
        case eres of
@@ -118,7 +134,7 @@ openCircuit cm restricts =
     | exitNode == ceExitNode x = new : replaceEntry exitNode new rest
     | otherwise                = x   : replaceEntry exitNode new rest
 
-closeCircuit :: HasBackend s => CircuitManager ls s -> TorCircuit -> IO ()
+closeCircuit :: HasBackend s => CircuitManager ls s -> OriginatedCircuit -> IO ()
 closeCircuit = error "closeCircuit"
 
 -- This is the code that actually builds a circuit, given an appropriate
@@ -130,13 +146,13 @@ closeCircuit = error "closeCircuit"
 --
 buildNewCircuit :: HasBackend s =>
                    CircuitManager ls s -> RouterDesc -> Int ->
-                   IO TorCircuit
+                   IO OriginatedCircuit
 buildNewCircuit cm exitNode len =
   do let notExit = [NotRouter exitNode]
      (link, desc, circId) <- newLinkCircuit (cmLinkManager cm) notExit
      cmLog cm ("Built initial link to " ++ show (routerIPv4Address desc) ++
                " with circuit ID " ++ show circId)
-     circ <- createCircuit (cmRNG cm) (cmLog cm) link desc circId
+     circ <- createCircuit (cmRNG cm) (cmOptions cm) link desc circId
      loop circ (NotRouter desc : notExit) len
  where
   loop circ _         0 =
@@ -154,3 +170,5 @@ snoc :: [a] -> a -> [a]
 snoc []       x = [x]
 snoc (x:rest) y = x : snoc rest y
 
+cmLog :: HasBackend s => CircuitManager ls s -> (String -> IO ())
+cmLog = torLog . cmOptions
