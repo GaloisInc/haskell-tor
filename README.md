@@ -8,7 +8,7 @@
 
 Tor is a secure onion routing network for providing anonymized access to both
 the public Internet as well as a series of Tor-internal hidden services. Much
-more information about Tor can be found at [http://torproject.org].
+more information about Tor can be found at http://torproject.org.
 
 Many thanks to all the hard work that project has put into developing and
 evangelizing Tor.
@@ -37,7 +37,7 @@ HaLVM-based installations. Windows support may work ... we just haven't tested
 it.
 
 If you're building with the HaLVM, please add the constraints `--constraint "tls
-+hans"`, `--constraint "tls -network"`, and "-f-network" to your build flags,
++hans"`, `--constraint "tls -network"`, and `-f-network` to your build flags,
 and if you're using the `integer-simple` library (for example, to avoid GPL
 entanglements with unikernels), you should add the constraints `--constraint
 "cryptonite -integer-gmp"`, `--constraint "scientific +integer-simple"` and
