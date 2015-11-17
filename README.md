@@ -36,6 +36,16 @@ This library uses cabal as its build system, and should work for Mac, Unix, and
 HaLVM-based installations. Windows support may work ... we just haven't tested
 it.
 
+If you're building with the HaLVM, please add the constraints `--constraint "tls
++hans"`, `--constraint "tls -network"`, and "-f-network" to your build flags,
+and if you're using the `integer-simple` library (for example, to avoid GPL
+entanglements with unikernels), you should add the constraints `--constraint
+"cryptonite -integer-gmp"`, `--constraint "scientific +integer-simple"` and
+`--constraint "scientific < 0.3.4.1"`.
+
+In either case, we strongly suggest using sandboxes to keep everything nice and
+tidy.
+
 ## Important Note
 
 This is an early implementation of Tor that has not been peer-reviewed. Those
