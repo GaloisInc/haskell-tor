@@ -1,4 +1,5 @@
 {-# LANGUAGE CPP #-}
+-- |Routines for integrating Tor with the standard network library.
 module Tor.NetworkStack.System(systemNetworkStack) where
 
 import Data.Binary.Put
@@ -14,6 +15,7 @@ import qualified Network.Socket.ByteString as Sys
 import Tor.DataFormat.TorAddress
 import Tor.NetworkStack
 
+-- |A Tor-compatible network stack that uses the 'network' library.
 systemNetworkStack :: TorNetworkStack Socket Socket
 systemNetworkStack = TorNetworkStack {
     Tor.NetworkStack.connect    = systemConnect

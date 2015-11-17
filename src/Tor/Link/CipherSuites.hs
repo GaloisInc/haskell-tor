@@ -1,3 +1,4 @@
+-- |Useful TLS ciphersuites for running Tor.
 module Tor.Link.CipherSuites(
          suiteTLS_ECDHE_ECDSA_WITH_AES_256_CBC_SHA
        , suiteTLS_ECDHE_RSA_WITH_AES_256_CBC_SHA

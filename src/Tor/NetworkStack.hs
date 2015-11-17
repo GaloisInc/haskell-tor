@@ -1,4 +1,5 @@
 {-# LANGUAGE ExistentialQuantification #-}
+-- |Defines the network API required for a Tor implementation to run.
 module Tor.NetworkStack(
          TorNetworkStack(..)
        , SomeNetworkStack(..)
@@ -14,8 +15,13 @@ import Data.Word
 import Network.TLS
 import Tor.DataFormat.TorAddress
 
-data SomeNetworkStack = forall lsock sock . HasBackend sock => MkNS (TorNetworkStack lsock sock)
+-- |A network stack, but with the type variables hidden.
+data SomeNetworkStack = forall lsock sock . HasBackend sock =>
+       MkNS (TorNetworkStack lsock sock)
 
+-- |The type of a Tor-compatible network stack. The first type variable is the
+-- type of a listener socket, the second the type of a standard connection
+-- socket. 
 data TorNetworkStack lsock sock = TorNetworkStack {
        connect    :: String -> Word16       -> IO (Maybe sock)
        -- |Lookup the given hostname and return any IP6 (Left) or IP4 (Right)
@@ -30,6 +36,7 @@ data TorNetworkStack lsock sock = TorNetworkStack {
      , lclose     :: lsock                  -> IO ()
      }
 
+-- |Receive a line of ASCII text from a socket.
 recvLine :: TorNetworkStack ls s -> s -> IO L.ByteString
 recvLine ns s = go []
  where
@@ -40,6 +47,8 @@ recvLine ns s = go []
          Just (10, _) -> return (L.pack (reverse acc))
          Just (f, _)  -> go (f:acc)
 
+-- |Receive all the input from the socket as a lazy ByteString; this may cause
+-- the system to block upon some ByteString operations to fetch more data.
 recvAll :: TorNetworkStack ls s -> s -> IO L.ByteString
 recvAll ns s = go []
  where
@@ -49,6 +58,8 @@ recvAll ns s = go []
           then return (L.fromChunks (reverse acc))
           else go (next:acc)
 
+-- |Convert a Tor-compatible network stack to a TLS-compatible Backend
+-- structure.
 toBackend :: TorNetworkStack ls s -> s -> Backend
 toBackend ns s = Backend {
     backendFlush = flush ns s

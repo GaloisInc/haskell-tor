@@ -1,3 +1,5 @@
+-- |This module provides a high-level interface for building, closing, and
+-- managing open circuits within the Tor network.
 module Tor.State.CircuitManager(
          CircuitManager
        , newCircuitManager
@@ -24,6 +26,8 @@ import Tor.State.Credentials
 import Tor.State.LinkManager
 import Tor.State.Routers
 
+-- |A handle for the circuit manager component, to be passed amongst functions
+-- in this module.
 data HasBackend s => CircuitManager ls s
        = NoCircuitManager
        | CircuitManager {
@@ -48,6 +52,11 @@ data CircuitEntry s = Pending {
                       , _ceCircuit         :: Weak (TransverseCircuit s)
                       }
 
+-- |Create a new circuit manager given the previously-initialized components.
+-- Using a circuit manager will allow you to more easily reuse circuits across
+-- multiple connections, decreasing the overhead of using Tor. In additionally,
+-- eventually you will be able to track and gather statistics on circuit history
+-- over time by using this component.
 newCircuitManager :: HasBackend s =>
                      TorOptions -> TorNetworkStack ls s ->
                      Credentials -> RouterDB -> LinkManager ls s ->
@@ -76,8 +85,8 @@ newCircuitManager opts ns creds rdb lm =
   logException e = torLog opts ("Exception creating incoming circuit: " ++
                                 show (e :: SomeException))
 
--- |Open a circuit to an exit node that allows connections to the given
--- host and port.
+-- |Open a circuit to an exit node that allows connections according to the
+-- given restrictions.
 openCircuit :: HasBackend s =>
                CircuitManager ls s -> [RouterRestriction] ->
                IO OriginatedCircuit
@@ -134,8 +143,10 @@ openCircuit cm restricts =
     | exitNode == ceExitNode x = new : replaceEntry exitNode new rest
     | otherwise                = x   : replaceEntry exitNode new rest
 
+-- |Close a circuit. DO NOT CALL THIS. Instead, just drop all references to the
+-- structure; we'll worry about this later.
 closeCircuit :: HasBackend s => CircuitManager ls s -> OriginatedCircuit -> IO ()
-closeCircuit = error "closeCircuit"
+closeCircuit = error "closeCircuit" -- FIXME
 
 -- This is the code that actually builds a circuit, given an appropriate
 -- final node.

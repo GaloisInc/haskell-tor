@@ -1,3 +1,4 @@
+-- |Parsing and rendering routines for relay cells.
 {-# LANGUAGE DeriveDataTypeable #-}
 module Tor.DataFormat.RelayCell(
          RelayCell(..),      putRelayCell,      getRelayCell
@@ -30,6 +31,7 @@ import Tor.DataFormat.TorCell
 
 -- FIXME: the stream id is only relevant for some of these items, and should
 -- probably be removed from the rest.
+-- |The format of a Relay cell in a Tor stream.
 data RelayCell =
     RelayBegin                 { relayStreamId       :: Word16
                                , relayBeginAddress   :: TorAddress
@@ -90,6 +92,8 @@ data RelayCell =
   | RelayIntroduceAck          { relayStreamId       :: Word16 }
  deriving (Eq, Show)
 
+-- |Various bits of information for dealing with hidden services. Currently not
+-- implemented.
 data RelayIntro1Data =
     RelayIntro1v0 { intRendPoint     :: ByteString
                   , intRendCookie    :: ByteString
@@ -112,7 +116,8 @@ data RelayIntro1Data =
                   , intRendCookie    :: ByteString
                   , intRendgx1       :: ByteString }
 
-
+-- |Parse a relay cell off the wire, returning the shortened digest and the
+-- parsed relay cell.
 getRelayCell :: Get (ByteString, RelayCell)
 getRelayCell =
   do cmd    <- getWord8
@@ -205,6 +210,8 @@ getRelayCell =
 
 -- -----------------------------------------------------------------------------
 
+-- |Render a relay cell using the given hash context, returning the rendered
+-- cell and the new hash context.
 renderRelayCell :: Context SHA1 -> RelayCell ->
                    (ByteString, Context SHA1)
 renderRelayCell state cell = (result, state')
@@ -215,6 +222,8 @@ renderRelayCell state cell = (result, state')
   digest      = hashFinalize state'
   result      = injectRelayHash (BS.take 4 (convert digest)) base
 
+-- |Parse a relay cell, verifying that the digest matches appropriately,
+-- returning the parsed cell and new hash context.
 parseRelayCell :: Context SHA1 -> Get (RelayCell, Context SHA1)
 parseRelayCell state =
   do chunk <- getByteString 509 -- PAYLOAD_LEN
@@ -236,6 +245,7 @@ injectRelayHash digest base =
 
 -- -----------------------------------------------------------------------------
 
+-- |Perform a raw relay cell render, with 0 for the hash mark.
 putRelayCell :: ByteString -> RelayCell -> Put
 putRelayCell dgst x =
   do let (cmd, bstr) = runPutM (putRelayCellGuts x)
@@ -250,6 +260,7 @@ putRelayCell dgst x =
      putLazyByteString bstr
      putByteString     (BS.replicate ((509 - 11) - BS.length bstr') 0)
 
+-- |Render the internals of a relay cell (basically everything but the header).
 putRelayCellGuts :: RelayCell -> PutM Word8
 putRelayCellGuts x@RelayBegin{} =
   do let str = unTorAddress (relayBeginAddress x) ++ ":" ++
@@ -387,6 +398,7 @@ parseAddrPort bstr =
 
 -- -----------------------------------------------------------------------------
 
+-- |A reason that someone might want to end a relay.
 data RelayEndReason = ReasonMisc
                     | ReasonResolveFailed
                     | ReasonConnectionRefused
@@ -405,6 +417,7 @@ data RelayEndReason = ReasonMisc
 
 instance Exception RelayEndReason
 
+-- |Parse a RelayEndReason.
 getRelayEndReason :: Word16 -> Get RelayEndReason
 getRelayEndReason len =
   do b <- getWord8
@@ -432,6 +445,7 @@ getRelayEndReason len =
        14 -> return ReasonNotDirectory
        _  -> fail ("Unknown destroy reason: " ++ show b)
 
+-- |Render a RelayEndReason.
 putRelayEndReason :: RelayEndReason -> Put
 putRelayEndReason ReasonMisc              = putWord8 1
 putRelayEndReason ReasonResolveFailed     = putWord8 2
@@ -453,11 +467,13 @@ putRelayEndReason ReasonNotDirectory        = putWord8 14
 
 -- -----------------------------------------------------------------------------
 
+-- |The format for extension request.
 data ExtendSpec = ExtendIP4    String     Word16
                 | ExtendIP6    String     Word16
                 | ExtendDigest ByteString
  deriving (Eq, Show)
 
+-- |Render an ExtendSpec.
 putExtendSpec :: ExtendSpec -> Put
 putExtendSpec (ExtendIP4 addr port) =
   do putWord8          0x00
@@ -474,6 +490,7 @@ putExtendSpec (ExtendDigest hash) =
      putWord8          20
      putByteString     hash
 
+-- |Parse an ExtendSpec
 getExtendSpec :: Get ExtendSpec
 getExtendSpec =
   do lstype <- getWord8

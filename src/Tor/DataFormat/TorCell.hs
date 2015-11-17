@@ -1,4 +1,5 @@
 {-# LANGUAGE DeriveDataTypeable #-}
+-- |Low-level rendering and parsing routines for raw Tor cells.
 module Tor.DataFormat.TorCell(
          TorCell(..),       putTorCell,       getTorCell
        , DestroyReason(..), putDestroyReason, getDestroyReason
@@ -24,6 +25,7 @@ import Data.X509
 import Data.Word
 import Tor.DataFormat.TorAddress
 
+-- |A raw tor cell.
 data TorCell = Padding
              | Create      Word32 ByteString
              | Created     Word32 ByteString
@@ -43,6 +45,7 @@ data TorCell = Padding
              | Authorize
  deriving (Eq, Show)
 
+-- |Given a tor cell, return the circuit it's associated with, if it is.
 getCircuit :: TorCell -> Maybe Word32
 getCircuit x =
   case x of
@@ -57,6 +60,7 @@ getCircuit x =
     Created2    circId _   -> Just circId
     _                      -> Nothing
 
+-- |Return True iff this is a padding cell of some sort.
 isPadding :: TorCell -> Bool
 isPadding x =
   case x of
@@ -64,6 +68,7 @@ isPadding x =
     VPadding _ -> True
     _          -> False
 
+-- |Parse a TorCell
 getTorCell :: Get TorCell
 getTorCell =
   do circuit <- getWord32be
@@ -129,6 +134,7 @@ getTorCell =
        s <- getByteString (fromIntegral l)
        return (Authenticate s)
 
+-- |Render a TorCell
 putTorCell :: TorCell -> Put
 putTorCell Padding =
   putStandardCell $
@@ -239,6 +245,7 @@ putStandardCell m =
 
 -- -----------------------------------------------------------------------------
 
+-- |A reason that a Circuit could or has been destroyed.
 data DestroyReason = NoReason
                    | TorProtocolViolation
                    | InternalError
@@ -257,6 +264,7 @@ data DestroyReason = NoReason
 
 instance Exception DestroyReason
 
+-- |Parse a DestroyReason.
 getDestroyReason :: Get DestroyReason
 getDestroyReason =
   do b <- getWord8
@@ -276,6 +284,7 @@ getDestroyReason =
        12 -> return NoSuchService
        _  -> return (UnknownDestroyReason b)
 
+-- |Render a DestroyReason
 putDestroyReason :: DestroyReason -> Put
 putDestroyReason NoReason                   = putWord8 0
 putDestroyReason TorProtocolViolation       = putWord8 1
@@ -294,9 +303,11 @@ putDestroyReason (UnknownDestroyReason x)   = putWord8 x
 
 -- -----------------------------------------------------------------------------
 
+-- |The two supported handshake types for Tor.
 data HandshakeType = TAP | Reserved | NTor | Unknown Word16
  deriving (Eq, Show)
 
+-- |Parse a handshake identifier.
 getHandshakeType :: Get HandshakeType
 getHandshakeType =
   do t <- getWord16be
@@ -306,6 +317,7 @@ getHandshakeType =
        0x0002 -> return NTor
        _      -> return (Unknown t)
 
+-- |Render a handshake identifier.
 putHandshakeType :: HandshakeType -> Put
 putHandshakeType TAP         = putWord16be 0x0000
 putHandshakeType Reserved    = putWord16be 0x0001
@@ -314,12 +326,14 @@ putHandshakeType (Unknown x) = putWord16be x
 
 -- -----------------------------------------------------------------------------
 
+-- |The kinds of certificates used within the initial Tor handshake.
 data TorCert = LinkKeyCert SignedCertificate
              | RSA1024Identity SignedCertificate
              | RSA1024Auth SignedCertificate
              | UnknownCertType Word8 ByteString
  deriving (Eq, Show)
 
+-- |Parse a certificate.
 getTorCert :: Get TorCert
 getTorCert =
   do t <- getWord8
@@ -336,6 +350,7 @@ getTorCert =
       Left  _   -> UnknownCertType t bstr
       Right res -> builder res
 
+-- |Render a certificate.
 putTorCert :: TorCert -> Put
 putTorCert tc =
   do let (t, bstr) = case tc of

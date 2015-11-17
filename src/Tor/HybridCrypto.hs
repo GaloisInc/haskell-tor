@@ -1,3 +1,6 @@
+-- |Tor defines a form of hybrid crypto, in which data is either just encrypted
+-- with a public key, or, encrypted using a hybrid of RSA and AES. This module
+-- implements this technique.
 module Tor.HybridCrypto(
          hybridEncrypt
        , hybridDecrypt
@@ -15,6 +18,9 @@ import Crypto.Random
 import Data.ByteString
 import Prelude hiding (length, splitAt)
 
+-- |Encrypt a piece of data using the given public key, optionally forcing the
+-- routine to use hybrid encryption even if the size of the data doesn't warrant
+-- it.
 hybridEncrypt :: MonadRandom m =>
                  Bool -> PublicKey -> ByteString ->
                  m ByteString
@@ -34,6 +40,7 @@ hybridEncrypt force pubkey m
              em2 = ctrCombine key nullIV m2
          return (ekm1 `append` em2)
 
+-- |Decrypt a piece of data using the given private key.
 hybridDecrypt :: MonadRandom m =>
                  PrivateKey -> ByteString ->
                  m ByteString

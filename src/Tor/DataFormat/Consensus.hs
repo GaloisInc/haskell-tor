@@ -1,6 +1,7 @@
 {-# LANGUAGE MultiWayIf        #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
+-- |Routines for parsing a consensus document.
 module Tor.DataFormat.Consensus(
          Consensus(..)
        , Authority(..)
@@ -23,6 +24,7 @@ import Data.Version
 import Data.Word
 import Tor.DataFormat.Helpers
 
+-- |A current consensus from a directory server.
 data Consensus = Consensus {
        conMethods             :: Maybe [Int]
      , conMethod              :: Int
@@ -41,6 +43,7 @@ data Consensus = Consensus {
      }
  deriving (Show)
 
+-- |An authority that might sign a consensus document.
 data Authority = Authority {
        authName       :: String
      , authIdent      :: ByteString
@@ -53,6 +56,7 @@ data Authority = Authority {
      }
  deriving (Show)
 
+-- |A router within the consensus document.
 data Router = Router {
        rtrNickName       :: String
      , rtrIdentity       :: ByteString
@@ -69,6 +73,9 @@ data Router = Router {
      }
  deriving (Show)
 
+-- |Parse a consensus document, returning either an error or the parsed
+-- consensus and the SHA1 and SHA256 hashes of that consensus, for later
+-- validation.
 parseConsensusDocument :: ByteString ->
                           Either String (Consensus, ByteString, ByteString)
 parseConsensusDocument bstr =

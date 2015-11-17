@@ -1,3 +1,4 @@
+-- |Credential management for a Tor node.
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
 module Tor.State.Credentials(
@@ -42,6 +43,7 @@ import Tor.Options
 import Tor.RNG
 import Tor.RouterDesc
 
+-- |A snapshot of the current credential state for the system.
 data CredentialState = CredentialState {
                          credRNG           :: TorRNG
                        , credStartTime     :: DateTime
@@ -54,8 +56,10 @@ data CredentialState = CredentialState {
                        , credTLS           :: (SignedCertificate, PrivKey)
                        }
 
+-- |The current credentials held by the node.
 newtype Credentials = Credentials (MVar CredentialState)
 
+-- |Generate new credentials fora fresh node.
 newCredentials :: TorOptions -> IO Credentials
 newCredentials opts =
   do g   <- drgNew
@@ -72,15 +76,19 @@ newCredentials opts =
   showFingerprint c =
     filter (/= ' ') (simpleHex (keyHash sha1 (signedObject (getSigned (fst c)))))
 
+-- |Get the public signing certificate and its associated private key.
 getSigningKey :: Credentials -> IO (SignedCertificate, PrivKey)
 getSigningKey = getCredentials credIdentity
 
+-- |Get the public onion certificate and its associated private key.
 getOnionKey :: Credentials -> IO (SignedCertificate, PrivKey)
 getOnionKey = getCredentials credOnion
 
+-- |Get the public NTor Curve25519 public and private keys.
 getNTorOnionKey :: Credentials -> IO (Curve.PublicKey, SecretKey)
 getNTorOnionKey = getCredentials credOnionNTor
 
+-- |Get the public TLS certificate and its associated private key.
 getTLSKey :: Credentials -> IO (SignedCertificate, PrivKey)
 getTLSKey = getCredentials credTLS
 
@@ -92,11 +100,15 @@ getCredentials getter (Credentials stateMV) =
      putMVar stateMV $! state'
      return (getter state')
 
+-- |Get the current set of addresses we believe are associated with the node.
+-- You should make sure to establish at least one outgoing link before calling
+-- this.
 getAddresses :: Credentials -> IO [TorAddress]
 getAddresses (Credentials stateMV) =
   withMVar stateMV $ \ state ->
     return (orderList (credAddresses state))
 
+-- |Get our own, current router decsription.
 getRouterDesc :: Credentials -> IO RouterDesc
 getRouterDesc (Credentials stateMV) =
   withMVar stateMV $ \ state ->
@@ -130,6 +142,7 @@ getRouterDesc (Credentials stateMV) =
          IP6 a -> (f, (a,p):rest')
          _     -> (f, rest')
 
+-- |Add a new set of addresses that should be associated with our node.
 addNewAddresses :: Credentials -> TorAddress -> IO [TorAddress]
 addNewAddresses (Credentials stateMV) addr =
   modifyMVar stateMV $ \ state ->
@@ -230,6 +243,8 @@ maybeRegenTLS force now state | force || (now > expiration) = (state', True)
 
 -- ----------------------------------------------------------------------------
 
+-- |Create a new certificate containing the public key and signed by the private
+-- key, using the given serial number, CommonName, and validity period.
 createCertificate :: PubKey -> PrivKey ->
                      Integer -> String -> (DateTime, DateTime) ->
                      SignedExact Certificate
@@ -257,11 +272,13 @@ signMsg (PrivKeyRSA key) bstr = (sig, SignatureALG HashSHA1 PubKeyALG_RSA, ())
   errorLeft (Right x) = x
 signMsg _                _     = error "Sign with non-RSA private key."
 
+-- |Generate a new public/private RSA key pair of the given bit size.
 generateKeyPair :: DRG g => g -> Int -> (RSA.PublicKey, PrivateKey, g)
 generateKeyPair g bitSize = (pubKey, privKey, g')
  where
   ((pubKey, privKey), g') = withDRG g (generate (bitSize `div` 8) 65537)
 
+-- |Return true if the first certificate is signed by the second.
 isSignedBy :: SignedCertificate -> Certificate -> Bool
 isSignedBy cert bycert =
   case signedAlg (getSigned cert) of

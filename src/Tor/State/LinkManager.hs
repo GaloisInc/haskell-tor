@@ -1,3 +1,4 @@
+-- |A module for managing the collection of links held by the Tor node.
 module Tor.State.LinkManager(
          LinkManager
        , newLinkManager
@@ -20,6 +21,10 @@ import Tor.RouterDesc
 import Tor.State.Credentials
 import Tor.State.Routers
 
+-- |The LinkManager, as you'd guess, serves as a unique management point for
+-- holding all the links the current Tor node is operating on. The goal of this
+-- module is to allow maximal re-use of incoming and outgoing links while also
+-- maintaining enough links to provide anonymity guarantees.
 data HasBackend s => LinkManager ls s = LinkManager {
        lmNetworkStack        :: TorNetworkStack ls s
      , lmRouterDB            :: RouterDB
@@ -32,6 +37,8 @@ data HasBackend s => LinkManager ls s = LinkManager {
      , lmIncomingLinkHandler :: MVar (TorLink -> IO ())
      }
 
+-- |Create a new link manager with the given options, network stack, router
+-- database and credentials.
 newLinkManager :: HasBackend s =>
                   TorOptions ->
                   TorNetworkStack ls s ->
@@ -68,6 +75,9 @@ newLinkManager o ns routerDB creds =
   idealLinks = maybe 3 torTargetLinks (torEntranceOptions o)
   maxLinks   = maybe 3 torMaximumLinks (torRelayOptions o)
 
+-- |Generate the first link in a new circuit, where the first hop meets the
+-- given restrictions. The result is the new link, the router description of
+-- that link, and a new circuit id to use when creating the circuit.
 newLinkCircuit :: HasBackend s =>
                   LinkManager ls s -> [RouterRestriction] ->
                   IO (TorLink, RouterDesc, Word32)
@@ -99,6 +109,7 @@ newLinkCircuit lm restricts =
        circId       <- modifyMVar (lmRNG lm) (linkNewCircuitId link)
        return (curLinks ++ [link], (link, entranceDesc, circId))
 
+-- |Set a callback that will fire any time a new link is added to the system.
 setIncomingLinkHandler :: HasBackend s =>
                           LinkManager ls s -> (TorLink -> IO ()) ->
                           IO ()

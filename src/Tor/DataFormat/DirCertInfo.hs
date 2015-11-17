@@ -1,5 +1,6 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
+-- |Data formats for directory cert information.
 module Tor.DataFormat.DirCertInfo(
          DirectoryCertInfo(..)
        , parseDirectoryCertInfo
@@ -16,6 +17,7 @@ import qualified Data.ByteString as BS
 import Data.Hourglass
 import Tor.DataFormat.Helpers
 
+-- |Information about a directory cert.
 data DirectoryCertInfo = DirectoryCertInfo {
        dcFingerprint      :: ByteString
      , dcPublished        :: DateTime
@@ -27,6 +29,7 @@ data DirectoryCertInfo = DirectoryCertInfo {
  deriving (Show)
 
 -- FIXME: Handle partial input
+-- |Parse in a DirectoryCertInfo.
 parseDirectoryCertInfo :: ByteString -> Either String DirectoryCertInfo
 parseDirectoryCertInfo bstr =
   case parse dirCertInfo bstr of

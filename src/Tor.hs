@@ -1,4 +1,23 @@
 {-# LANGUAGE ExistentialQuantification #-}
+-- |The high-level interface to the Tor implementation. Basic usage, for
+-- using Tor as a mechanism for connecting to Internet services anonymously:
+--
+-- @
+-- main :: IO ()
+-- main =
+--   do tor <- startTor systemNetworkStack defaultTorOptions
+--      addrs <- torResolveName tor "hostname.com"
+--      case addrs of
+--        [] -> ...
+--        ((x, _):_) ->
+--          do sock <- torConnect tor x 80
+--             torWrite sock ...
+--             resp <- torRead sock 1024
+--             ...
+-- @
+--
+-- HaLVM users should initialize a HaNS network stack, and use that instead of
+-- systemNetworkStack, above.
 module Tor(
          -- * Setup and initialization
          Tor
@@ -93,6 +112,10 @@ torResolveName (Tor cm) name =
   do circ <- openCircuit cm [ExitNode]
      resolveName circ name
 
+-- |Connect to the given address via Tor. The TorAddress should be one of the
+-- IP4 or IP6 variants, rather than a hostname or an error. The result will be
+-- the built circuit. This will throw exceptions if failures occur during the
+-- building process.
 torConnect :: Tor -> TorAddress -> Word16 -> IO TorSocket
 torConnect (Tor cm) addr port =
   do circ <- openCircuit cm [ExitNodeAllowing addr port]

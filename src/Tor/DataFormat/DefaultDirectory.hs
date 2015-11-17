@@ -1,5 +1,7 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
+-- |Routines for parsing and rendering the default directories included in this
+-- binary.
 module Tor.DataFormat.DefaultDirectory(
          DefaultDirectory(..)
        , parseDefaultDirectory
@@ -11,6 +13,7 @@ import Data.ByteString(ByteString)
 import Data.Word
 import Tor.DataFormat.Helpers
 
+-- |A default directory for pulling consensus and other data.
 data DefaultDirectory = DefaultDirectory {
        ddirNickname    :: String
      , ddirIsBridge    :: Bool
@@ -23,6 +26,7 @@ data DefaultDirectory = DefaultDirectory {
  deriving (Show)
 
 -- FIXME: Make this handle partial input
+-- |Parse a directory structure.
 parseDefaultDirectory :: ByteString -> Either String DefaultDirectory
 parseDefaultDirectory bstr =
   case parse defaultDirectory bstr of

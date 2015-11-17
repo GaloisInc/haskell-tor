@@ -1,3 +1,4 @@
+-- |Addresses within Tor. TODO/FIXME: Fix everything about this module.
 module Tor.DataFormat.TorAddress(
          TorAddress(..),    putTorAddress,    getTorAddress
        , unTorAddress
@@ -19,19 +20,28 @@ import Data.List(intercalate)
 import Data.Word
 import Numeric
 
-data TorAddress = Hostname String
-                | IP4 String
-                | IP6 String
-                | TransientError String
-                | NontransientError String
+-- |An abstract data type representing either an address or an address
+-- processing error, used in a variety of Tor protocols.
+data TorAddress = Hostname String -- ^A hostname, as usual.
+                | IP4 String -- ^An IP4 address, as 'a.b.c.d', in decimal
+                | IP6 String -- ^An IP6 adddress, as '[...]', in usual hex form
+                | TransientError String -- ^A transient error occurred when
+                                        -- performing some action. Try again.
+                | NontransientError String -- ^A non-transient error occurred
+                                           -- when performing some action. Do
+                                           -- not try again, or you will annoy
+                                           -- the dragon.
  deriving (Eq, Ord, Show)
 
+-- |Turn a TorAddress into a string. Will result in an error for either of the
+-- error options.
 unTorAddress :: TorAddress -> String
 unTorAddress (Hostname s) = s
 unTorAddress (IP4 s) = s
 unTorAddress (IP6 s) = s
 unTorAddress _       = error "unTorAddress: invalid input."
 
+-- |Parse a TorAddress off the wire.
 getTorAddress :: Get TorAddress
 getTorAddress =
   do atype <- getWord8
@@ -47,9 +57,14 @@ getTorAddress =
        (0xF1, _)  -> return (NontransientError "External nontransient error.")
        (_,    _)  -> return (NontransientError ("Unknown address type: " ++ show atype))
 
+-- |Turn a 32-bit ByteString containing an IP4 address into the normal String
+-- version of that IP4 address.
 ip4ToString :: ByteString -> String
 ip4ToString bstr = intercalate "." (map show (BS.unpack bstr))
 
+-- |Turn a normal 128-bit ByteString containing an IP6 address into the normal
+-- String version of that IP6 address. Recall that for Tor, the normal String
+-- version is wrapped in square braces ([0000:11111:...]).
 ip6ToString :: ByteString -> String
 ip6ToString bstr = "[" ++ intercalate ":" (run (BS.unpack bstr)) ++ "]"
  where
@@ -62,6 +77,7 @@ ip6ToString bstr = "[" ++ intercalate ":" (run (BS.unpack bstr)) ++ "]"
         v  = (a' `shiftL` 8) .|. b'
     in (showHex v "" : run rest)
 
+-- |A putter for TorAddresses.
 putTorAddress :: TorAddress -> Put
 putTorAddress (Hostname str) =
   do putWord8 0x00
@@ -83,9 +99,15 @@ putTorAddress (NontransientError _) =
   do putWord8 0xF1
      putWord8 0
 
+-- |Given a normally-formatted IP4 String (a.b.c.d), turn that into a 32-bit
+-- ByteString containing that IP address.
 putIP4String :: String -> Put
 putIP4String str = forM_ (unintercalate '.' str) (putWord8 . read)
 
+-- |Given a normally-formatted IP6 String ([aaaa:bbbb:...]), turn that into a
+-- 128-bit ByteString containing that IP address. Note that this function does
+-- not support IP6 address compression ([aaaa::bbbbb]), so this must be a
+-- fully-expanded address.
 putIP6String :: String -> Put
 putIP6String str =
   do let str' = unwrapIP6 str
@@ -94,6 +116,7 @@ putIP6String str =
         []        -> fail "Couldn't read IP6 address component."
         ((x,_):_) -> putWord16be x
 
+-- |Translate a TorAddress into a ByteString.
 torAddressByteString :: TorAddress -> ByteString
 torAddressByteString (IP4 x) = 
   toStrict (runPut (forM_ (unintercalate '.' x) (putWord8 . read)))
