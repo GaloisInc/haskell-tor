@@ -1,3 +1,4 @@
+-- |Various options for running a Tor node
 module Tor.Options(
          -- * Options for running Tor
          TorOptions(..),         defaultTorOptions
@@ -39,6 +40,7 @@ defaultTorOptions = TorOptions {
   , torExitOptions     = Nothing
   }
 
+-- |Options for allowing circuits that originated at this node.
 data TorEntranceOptions = TorEntranceOptions {
        -- |The number of intermediate hops to use between this node and
        -- the exit node. To be clear, created circuits will have an entrance
@@ -58,6 +60,7 @@ defaultTorEntranceOptions  = TorEntranceOptions {
   , torTargetLinks           = 5
   }
 
+-- |Options for allowing circuits that pass through this node.
 data TorRelayOptions = TorRelayOptions {
       -- |The port to listen on. By default, this is 9374, but there are
       -- compelling reasons to have it be some other wel-known port, like
@@ -93,6 +96,7 @@ defaultTorRelayOptions  = TorRelayOptions {
   , torMaximumLinks = 50
   }
 
+-- |Options for allowing circuits that end at this node.
 data TorExitOptions = TorExitOptions {
       -- |The rules for allowing or rejecting traffic leaving this node.
       torExitRules :: [ExitRule]

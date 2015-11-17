@@ -1,3 +1,4 @@
+-- |Routines for rendering router descriptions.
 module Tor.RouterDesc.Render(
          renderRouterDesc
        )
@@ -63,6 +64,8 @@ putSeperated sep render (x:rest) =
 
 -- ----------------------------------------------------------------------------
 
+-- |Render the given router description, signing it with the given private
+-- signing key.
 renderRouterDesc :: RouterDesc -> PrivateKey -> String
 renderRouterDesc r k = snd (runWriter (renderRouterDesc' r k))
 

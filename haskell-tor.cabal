@@ -1,8 +1,14 @@
 name:                haskell-tor
 version:             0.1.0.0
 synopsis:            A Haskell Tor Node
-homepage:            http://galois.com
-license:             AllRightsReserved
+description:         An implementation of the Tor anonymity system in Haskell.
+                     The core functionality is exported both as an application
+                     and as a high-level library exported by the 'Tor' module.
+                     Please see that module for common usage scenarios, and
+                     dip only into the other files for advanced / unplanned
+                     cases.
+homepage:            http://github.com/GaloisInc/haskell-tor
+license:             BSD3
 license-file:        LICENSE
 author:              Adam Wick
 maintainer:          awick@galois.com

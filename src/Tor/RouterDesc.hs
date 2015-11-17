@@ -1,3 +1,4 @@
+-- |Structures and rules for describing routers.
 module Tor.RouterDesc(
          RouterDesc(..)
        , blankRouterDesc
@@ -14,6 +15,7 @@ import Data.ByteString(ByteString, empty)
 import Data.Hourglass
 import Data.Word
 
+-- |The complete description of a router within the Tor network.
 data RouterDesc = RouterDesc {
        routerNickname                :: String
      , routerIPv4Address             :: String
@@ -52,6 +54,8 @@ data RouterDesc = RouterDesc {
 instance Eq RouterDesc where
   a == b = routerSigningKey a == routerSigningKey b
 
+-- |A blank router description, with most of the options initialized with
+-- standard "blank" values.
 blankRouterDesc :: RouterDesc
 blankRouterDesc =
   RouterDesc {
@@ -88,26 +92,35 @@ blankRouterDesc =
   , routerStatus                  = []
   }
 
+-- |A family descriptor for a node. Either a nickname, or a digest referencing
+-- the family, or both.
 data NodeFamily = NodeFamilyNickname String
                 | NodeFamilyDigest ByteString
                 | NodeFamilyBoth String ByteString
  deriving (Show)
 
-data ExitRule = ExitRuleAccept AddrSpec PortSpec
-              | ExitRuleReject AddrSpec PortSpec
+-- |A rule for accepting or rejecting traffic, usually specified by exit nodes.
+data ExitRule = ExitRuleAccept AddrSpec PortSpec -- ^Accept matching traffic.
+              | ExitRuleReject AddrSpec PortSpec -- ^Reject matching traffic.
  deriving (Show)
 
-data PortSpec = PortSpecAll
-              | PortSpecRange  Word16 Word16
-              | PortSpecSingle Word16
+-- |A port specifier
+data PortSpec = PortSpecAll -- ^Accept any port
+              | PortSpecRange  Word16 Word16 -- ^Accept ports between the two
+                                             -- values, inclusive.
+              | PortSpecSingle Word16 -- ^Accept only the given port.
  deriving (Eq, Show)
 
-data AddrSpec = AddrSpecAll
-              | AddrSpecIP4     String
-              | AddrSpecIP4Mask String String
-              | AddrSpecIP4Bits String Int
-              | AddrSpecIP6     String
-              | AddrSpecIP6Bits String Int
+-- |An address or subnet specifier.
+data AddrSpec = AddrSpecAll -- ^Accept any address
+              | AddrSpecIP4     String -- ^Accept this specific address.
+              | AddrSpecIP4Mask String String -- ^Accept this IP address and
+                -- subnet mask (255.255.255.0,etc.)
+              | AddrSpecIP4Bits String Int -- ^Accept this IP address and CIDR
+                -- mask (/24,etc.)
+              | AddrSpecIP6     String -- ^Accept this specific IP6 address.
+              | AddrSpecIP6Bits String Int -- ^Accept this subnet and CIDR
+                -- mask.
  deriving (Eq, Show)
 
 

@@ -1,3 +1,4 @@
+-- |Low-level interface for establishing links between Tor nodes.
 {-# LANGUAGE MultiWayIf #-}
 module Tor.Link(
          TorLink
@@ -61,9 +62,14 @@ import Tor.State.Routers
 
 -- -----------------------------------------------------------------------------
 
+-- |A direct link between us and another Tor node.
 data TorLink = TorLink {
        linkContext           :: Context
+       -- FIXME: Should disallowing unknown nodes be an option?
+       -- |The RouterDesc associated with this link, if we have one. (It will
+       -- not always be possible to find incoming links in the database.)
      , linkRouterDesc        :: Maybe RouterDesc
+       -- |Whether the link was initiated here (False) or elsewhere (True)
      , linkInitiatedRemotely :: Bool
      , linkReaderThread      :: ThreadId
      , linkReadBuffers       :: MVar (Map Word32 (Chan TorCell))
@@ -205,6 +211,7 @@ runLink llog rChansMV context initialBS =
 
 -- -----------------------------------------------------------------------------
 
+-- |Generate a random new circuit id for a link.
 linkNewCircuitId :: DRG g =>
                     TorLink -> g ->
                     IO (g, Word32)
@@ -432,6 +439,8 @@ exactlyOneLink ((LinkKeyCert _):_)    (Just _) = error "Too many link certs."
 exactlyOneLink ((LinkKeyCert c):rest) Nothing  = exactlyOneLink rest (Just c)
 exactlyOneLink (_:rest)               acc      = exactlyOneLink rest acc
 
+-- |Given an incoming socket, accept a formal Tor link from the incoming party.
+-- Or throw an error. Whatever.
 acceptLink :: HasBackend s =>
               Credentials -> RouterDB -> MVar TorRNG -> (String -> IO ()) ->
               s -> TorAddress ->

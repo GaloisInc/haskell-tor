@@ -1,4 +1,5 @@
 {-# LANGUAGE RecordWildCards   #-}
+-- |A module for maintaining an up-to-date list of Tor nodes in the Tor network.
 module Tor.State.Routers(
          RouterDB
        , RouterRestriction(..)
@@ -43,6 +44,7 @@ import Tor.RNG
 import Tor.RouterDesc
 import Tor.State.Directories
 
+-- |The current router database, refreshed at regular intervals.
 newtype RouterDB = RouterDB (MVar RouterDBVersion)
 
 data RouterDBVersion = RDB {
@@ -50,6 +52,7 @@ data RouterDBVersion = RDB {
      , rdbRouters       :: Array Word RouterDesc
      }
 
+-- |Restrictions to apply when searching for a router or set of routers.
 data RouterRestriction = IsStable -- ^Marked with the Stable flag
                        | NotRouter RouterDesc -- ^Is not the given router
                        | NotTorAddr TorAddress -- ^Is not the given address
@@ -109,6 +112,8 @@ getRouter (RouterDB routerDB) restrictions rng =
       Left  _ -> fail "Cannot read 64-bit Word from 64 bytes ..."
       Right x -> return x
 
+-- |Returns true iff the given router meets all the given restrictions. (If no
+-- restrictions are provided, then the router meets all of them.)
 meetsRestrictions :: RouterDesc -> [RouterRestriction] -> Bool
 meetsRestrictions _   []       = True
 meetsRestrictions rtr (r:rest) =
@@ -132,6 +137,8 @@ meetsRestrictions rtr (r:rest) =
   allowsExits (ExitRuleReject AddrSpecAll PortSpecAll : _) = False
   allowsExits _ = True
 
+-- |Returns true iff the given exit rules allow traffic to the given address /
+-- port pair.
 allowsExit :: [ExitRule] -> TorAddress -> Word16 -> Bool
 allowsExit [] _ _ = True -- "if no rule matches, the address wil be accepted"
 allowsExit (ExitRuleAccept addrrule portrule : rrest) addr port

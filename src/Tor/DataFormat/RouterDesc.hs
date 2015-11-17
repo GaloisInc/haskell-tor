@@ -1,5 +1,6 @@
 {-# LANGUAGE MultiWayIf #-}
 {-# LANGUAGE OverloadedStrings #-}
+-- |Routines for parsing router descriptions from a directory listing.
 module Tor.DataFormat.RouterDesc(
          parseDirectory
        )
@@ -21,6 +22,8 @@ import Tor.DataFormat.Helpers
 import Tor.RouterDesc
 
 -- FIXME: Accept partial input.
+-- |Parse a directory listing full of router descriptions, returning, for each
+-- entry, either a parse error or the parsed router description.
 parseDirectory :: ByteString -> [Either String RouterDesc]
 parseDirectory bstr = map parseChunk (chunkRouters bstr)
  where

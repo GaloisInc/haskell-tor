@@ -1,10 +1,17 @@
+-- |Low-level routines for generating, extending, and destroying circuits. We
+-- strongly recommend not using this module unless you have a very good reason.
+-- You should probably just use the high-level Tor module or the CircuitManager
+-- module instead.
 {-# LANGUAGE RecordWildCards #-}
 module Tor.Circuit(
-       -- * High-level type for Tor circuits, and operations upon them.
+       -- * High-level type for Tor circuits that originate at the current
+       -- node, and operations upon them.
          OriginatedCircuit
        , createCircuit
        , destroyCircuit
        , extendCircuit
+       -- * High-level type and operations on circuits that are passing through
+       -- or exiting at this node.
        , TransverseCircuit
        , acceptCircuit
        , destroyTransverse
@@ -18,6 +25,9 @@ module Tor.Circuit(
        , torWrite
        , torClose
        -- * Miscellaneous routines, mostly exported for testing.
+       , CryptoData
+       , Curve25519Pair
+       , EncryptionState
        , startTAPHandshake
        , advanceTAPHandshake
        , completeTAPHandshake
@@ -52,7 +62,7 @@ import qualified Data.ByteString.Char8 as S8
 import qualified Data.ByteString.Lazy as L
 import Data.Either
 #if !MIN_VERSION_base(4,8,0)
-import Data.Foldable hiding (all)
+import Data.Foldable hiding (all,forM_)
 #endif
 import Data.IntSet(IntSet)
 import qualified Data.IntSet as IntSet
@@ -99,6 +109,13 @@ data OriginatedCircuit = OriginatedCircuit {
        , ocBackCryptoData  :: MVar [CryptoData]
        }
 
+
+-- |Create a new one-hop circuit across the given link. The router description
+-- given must be the router description for the given link, or the handshake
+-- will fail. The Word32 argument is the circuit id to use. The result is the
+-- new, one-hop circuit or a thrown exception. If you care about anonymity, you
+-- should extend this circuit a few times before trying to make any
+-- connections.
 createCircuit :: MVar TorRNG -> TorOptions ->
                  TorLink -> RouterDesc -> Word32 ->
                  IO OriginatedCircuit
@@ -141,6 +158,9 @@ createCircuit ocRNG ocOptions ocLink router1 ocId =
     forever $ do next <- linkRead ocLink ocId
                  processBackwardInput circ next
 
+-- |Extend the extant circuit to the given router. This is purely
+-- side-effecting, although it may thrw an error if an error occurs during the
+-- extension process.
 extendCircuit :: OriginatedCircuit -> RouterDesc -> IO ()
 extendCircuit circ nxt =
   do state <- readMVar (ocState circ)
@@ -205,6 +225,7 @@ destroyCircuit circ rsn =
   killResWaiters mv =
     void $ tryPutMVar mv []
 
+-- |Write a cell on the circuit we just created, pushing it through the network.
 writeCellOnCircuit :: OriginatedCircuit -> RelayCell -> IO ()
 writeCellOnCircuit circ relay =
   do keysnhashes <- takeMVar (ocForeCryptoData circ)
@@ -228,6 +249,8 @@ writeCellOnCircuit circ relay =
 
 -- ----------------------------------------------------------------------------
 
+-- |A handle for a circuit that orginated elsewhere, and is either passing
+-- through or exiting at this node.
 data TransverseCircuit s = TransverseCircuit {
          tcLink            :: TorLink
        , tcNextHop         :: MVar TorLink
@@ -243,6 +266,8 @@ data TransverseCircuit s = TransverseCircuit {
        , tcBackCryptoData  :: MVar CryptoData
        }
 
+
+-- |Accept a circuit from someone who just connected to us.
 acceptCircuit :: HasBackend s =>
                  TorNetworkStack ls s -> TorOptions ->
                  RouterDesc -> Credentials -> RouterDB ->
@@ -322,6 +347,7 @@ acceptCircuit ns tcOptions me tcCredentials tcRouterDB tcLink tcRNG =
     forever $ do next <- linkRead tcLink (tcId circ)
                  processForwardInput ns circ next
 
+-- |Destroy a circuit that is transiting us.
 destroyTransverse :: TorNetworkStack ls s ->
                      TransverseCircuit s -> DestroyReason ->
                      IO ()
@@ -659,6 +685,8 @@ circRelayUpstream circ relay =
 
 -- ----------------------------------------------------------------------------
 
+-- |Resolve the given hostname, anonymously. The result is a list of addresses
+-- associated with that hostname, and the TTL for those values.
 resolveName :: OriginatedCircuit -> String -> IO [(TorAddress, Word32)]
 resolveName circ str =
   do strmId <- getNextStreamId circ
@@ -670,6 +698,7 @@ resolveName circ str =
 
 -- ----------------------------------------------------------------------------
 
+-- |A socket for communicating with a server, anonymously, via Tor.
 data TorSocket = TorSocket {
        tsCircuit    :: OriginatedCircuit
      , tsStreamId   :: Word16
@@ -761,6 +790,10 @@ torRead sock amt =
   sendMe =
     writeCellOnCircuit (tsCircuit sock) (RelaySendMe (tsStreamId sock))
 
+-- |Close a Tor socket. This will notify the other end of the connection that
+-- you are done, so you should be sure you really don't need to do any more
+-- reading before calling this. At this point, this implementation does not
+-- support a half-closed option.
 torClose :: TorSocket -> RelayEndReason -> IO ()
 torClose sock reason =
   do let strmId = tsStreamId sock
@@ -770,6 +803,7 @@ torClose sock reason =
 
 -- ----------------------------------------------------------------------------
 
+-- |The current state of an encryptor.
 newtype EncryptionState = ES L.ByteString
 
 instance Eq EncryptionState where
@@ -820,6 +854,8 @@ getNextStreamId circ =
 
 -- -----------------------------------------------------------------------------
 
+-- |Perform the first step in a TAP handshake, generating a private value and
+-- the public cell body to send to the other side.
 startTAPHandshake :: RouterDesc -> TorRNG ->
                      (TorRNG, (PrivateNumber, ByteString))
 startTAPHandshake rtr g = (g'', (x, egx))
@@ -830,6 +866,9 @@ startTAPHandshake rtr g = (g'', (x, egx))
   nodePub         = routerOnionKey rtr
   (egx, g'')      = withDRG g' (hybridEncrypt True nodePub gxBS)
 
+-- |Given our information and the public value provided by the other side,
+-- compute both the shared secret and our public value to send back to the
+-- originator.
 advanceTAPHandshake :: PrivateKey -> Word32 -> ByteString -> TorRNG ->
                        (TorRNG, (TorCell, CryptoData, CryptoData))
 advanceTAPHandshake privkey circId egx g = (g'', (created, f, b))
@@ -842,6 +881,8 @@ advanceTAPHandshake privkey circId egx g = (g'', (created, f, b))
   (kh, f, b)      = computeTAPValues y gx
   created         = Created circId (gyBS `S.append` kh)
 
+-- |Given the private number generated before and the server's response,
+-- generate the shared secret and the appropriate crypto data.
 completeTAPHandshake :: PrivateNumber -> ByteString ->
                         Either String (CryptoData, CryptoData)
 completeTAPHandshake x rbstr
@@ -875,8 +916,14 @@ kdfTor k0 = L.fromChunks (map kdfTorChunk [0..255])
 
 -- -----------------------------------------------------------------------------
 
+-- |A shorthand for the pair of encryption and hashing state used by Tor. Note,
+-- because it's easy to forget, that the encryption state is updated on every
+-- cell that passes through the system, but the hashing state is only updated on
+-- cells that are destined for us.
 type CryptoData = (EncryptionState, Context SHA1)
 
+-- |Start an NTor handshake by generating a local Curve25519 pair and a public
+-- value to send to the server.
 startNTorHandshake :: RouterDesc -> TorRNG ->
                      (TorRNG, Maybe (Curve25519Pair, ByteString))
 startNTorHandshake router g0 =
@@ -890,6 +937,9 @@ startNTorHandshake router g0 =
           bstr = S.concat [nodeid, convert key, client_pk]
       in (g1, Just (pair, bstr))
 
+-- |As a server, accept the client's public value, generate the shared
+-- encryption state from that value, and generate a response to the client they
+-- can use to generate the same values.
 advanceNTorHandshake :: RouterDesc -> Curve.SecretKey -> Word32 ->
                         ByteString -> TorRNG ->
                         (TorRNG,
@@ -923,6 +973,7 @@ advanceNTorHandshake me littleB circId bstr0 g0
   outdata               = S.concat [server_pk, auth]
   (fenc, benc)          = computeNTorValues key_seed
 
+-- |Complete the NTor handhsake using the server's public value.
 completeNTorHandshake :: RouterDesc -> Curve25519Pair -> ByteString ->
                          Either String (CryptoData, CryptoData)
 completeNTorHandshake router (bigX, littleX) bstr
@@ -950,8 +1001,10 @@ completeNTorHandshake router (bigX, littleX) bstr
 curveExp :: Curve.PublicKey -> Curve.SecretKey -> ByteString
 curveExp a b = convert (dh a b)
 
+-- |A handy shorthand for a public and private Curve25519 pair.
 type Curve25519Pair = (Curve.PublicKey, Curve.SecretKey)
 
+-- |Generate a new Curve25519 key pair.
 generate25519 :: MonadRandom m => m Curve25519Pair
 generate25519 =
   do bytes <- getRandomBytes 32

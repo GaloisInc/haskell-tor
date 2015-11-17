@@ -1,3 +1,4 @@
+-- |Routines for tracking Tor directory servicers.
 module Tor.State.Directories(
          Directory(..)
        , DirectoryDB
@@ -30,6 +31,7 @@ import Tor.NetworkStack.Fetch
 import Tor.RouterDesc
 import Tor.RouterDesc.Render
 
+-- |The information about a directory within the Tor network.
 data Directory = Directory {
        dirNickname    :: String
      , dirIsBridge    :: Bool
@@ -45,8 +47,11 @@ data Directory = Directory {
      }
  deriving (Show)
 
+-- |The current directory database available to the node.
 newtype DirectoryDB = DDB (MVar [Directory])
 
+-- |Generate a directory of available databases from which we can pull router
+-- lists and publish our own router information, as necessary.
 newDirectoryDatabase :: TorNetworkStack ls s -> (String -> IO ()) ->
                         IO DirectoryDB
 newDirectoryDatabase ns logMsg =
@@ -85,6 +90,7 @@ newDirectoryDatabase ns logMsg =
              " default directories loaded.")
      DDB `fmap` newMVar loadedDirs
 
+-- |Send our router description to all of the directories we know about.
 sendRouterDescription :: TorNetworkStack ls s -> (String -> IO ()) ->
                          DirectoryDB ->
                          RouterDesc -> PrivateKey ->
@@ -113,6 +119,7 @@ sendRouterDescription ns out (DDB dirlsMV) desc pkey =
     "POST /tor/ HTTP/1.0\r\n" ++
     "Content-Length: " ++ show (S.length bstr) ++ "\r\n\r\n"
 
+-- |Select a random directory.
 getRandomDirectory :: DRG g => g -> DirectoryDB -> IO (Directory, g)
 getRandomDirectory g ddb@(DDB dirlsMV) =
   do ls <- readMVar dirlsMV
@@ -125,6 +132,7 @@ getRandomDirectory g ddb@(DDB dirlsMV) =
          do let idx = fromIntegral x `mod` length ls
             return (ls !! idx, g')
 
+-- |Find a directory that matches the given fingerprint.
 findDirectory :: ByteString -> DirectoryDB -> IO (Maybe Directory)
 findDirectory fprint (DDB dirlsMV) =
   find matchesFingerprint `fmap` readMVar dirlsMV
@@ -134,6 +142,7 @@ findDirectory fprint (DDB dirlsMV) =
       Nothing -> False
       Just x  -> x == fprint
 
+-- |Add a new directory to our set of known directories.
 addDirectory :: TorNetworkStack ls s -> (String -> IO ()) ->
                 DirectoryDB -> Authority ->
                 IO ()

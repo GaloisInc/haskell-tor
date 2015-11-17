@@ -1,6 +1,7 @@
 {-# LANGUAGE MultiWayIf        #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
+-- |Miscellaneous very useful parsing routines.
 module Tor.DataFormat.Helpers(
          PortSpec(..)
        , AddrSpec(..)
@@ -48,6 +49,7 @@ import Data.Hourglass
 import Data.Word
 import Tor.RouterDesc
 
+-- |Parse a standard line of "<name> <thing>\n".
 standardLine :: String -> Parser a -> Parser a
 standardLine thing parser =
   do _ <- string (pack thing)
@@ -56,6 +58,7 @@ standardLine thing parser =
      _ <- nl
      return x
 
+-- |Parse a Tor nickname.
 nickname :: Parser String
 nickname =
   do first <- alphaNum
@@ -70,9 +73,11 @@ nickname =
          Nothing  -> return (reverse acc)
          Just c   -> run (x + 1) (c : acc)
 
+-- |Parse a 20 byte hex digest.
 hexDigest :: Parser ByteString
 hexDigest = (readHex . toString) <$> count 40 hexDigit
 
+-- |Parse a port specifier
 portSpec :: Parser PortSpec
 portSpec = choice [ allPorts, somePorts, onePort ] <?> "portSpec"
  where
@@ -88,6 +93,7 @@ portSpec = choice [ allPorts, somePorts, onePort ] <?> "portSpec"
     do p <- port False
        return (PortSpecSingle p)
 
+-- |Parse a port number.
 port :: Bool -> Parser Word16
 port zeroOK =
   do base <- toString <$> many1 decDigit
@@ -97,6 +103,7 @@ port zeroOK =
         | otherwise                          -> empty
   <?> "port"
 
+-- |Parse an address specifier.
 addrSpec :: Parser AddrSpec 
 addrSpec = choice [ allAddrs, ip4Addrs, ip6Addrs ]
  where
@@ -123,6 +130,7 @@ addrSpec = choice [ allAddrs, ip4Addrs, ip6Addrs ]
   num_ip4_bits = decimalNum (<= 32)
   num_ip6_bits = decimalNum (<= 128)
 
+-- |Parse an IPv4 address.
 ip4 :: Parser String
 ip4 =
   do a <- decimalNum ip4num
@@ -137,6 +145,7 @@ ip4 =
   ip4num :: Int -> Bool
   ip4num x = x < 256
 
+-- |Parse an IPv6 address; assuming [0000:1111:....] format, with braces.
 ip6 :: Parser String
 ip6 = do
   _ <- char8 '[' -- FIXME: This parser is terrible
@@ -144,6 +153,7 @@ ip6 = do
   _ <- char8 ']'
   return (toString a)
 
+-- |Parse a public key. Returns both the public key and the raw data behind it.
 publicKey' :: Parser (PublicKey, ByteString)
 publicKey' =
   do _ <- string "-----BEGIN RSA PUBLIC KEY-----\n"
@@ -166,9 +176,11 @@ publicKey' =
   calculate_modulus n i =
     if (2 ^ (i * 8)) > n then i else calculate_modulus n (i + 1)
 
+-- |Parse a public key.
 publicKey :: Parser PublicKey
 publicKey = fst <$> publicKey'
 
+-- |Parse a timestamp in UTC format.
 utcTime :: Parser DateTime
 utcTime =
   do dateYear  <- toEnum' `fmap` count 4 decDigit
@@ -192,39 +204,46 @@ utcTime =
 
 -- ----------------------------------------------------------------------------
 
+-- |Parse a boolean. (0/1)
 bool :: Parser Bool
 bool = choice [ true, false ]
  where
   true  = char8 '1' >> return True
   false = char8 '0' >> return False
 
+-- |Parse a character.
 char8 :: Char -> Parser Word8
 char8 c = word8 (fromIntegral (ord c))
 
+-- |Parse an alphanumeric character.
 alphaNum :: Parser Word8
 alphaNum = satisfy isAlphaNum
 
 isAlphaNum :: Word8 -> Bool
 isAlphaNum = inClass (['A'..'Z']++['a'..'z']++['0'..'9'])
 
+-- |Parse a hex digit.
 hexDigit :: Parser Word8
 hexDigit = satisfy isHexDigit
 
 isHexDigit :: Word8 -> Bool
 isHexDigit = inClass (['0'..'9']++['a'..'f']++['A'..'F'])
 
+-- |Parse a decimal digit.
 decDigit :: Parser Word8
 decDigit = satisfy isDecimalDigit
 
 isDecimalDigit :: Word8 -> Bool
 isDecimalDigit = inClass ['0'..'9']
 
+-- |Parse a character in a Base64 stream.
 base64Char :: Parser Word8
 base64Char = satisfy isBase64Char
 
 isBase64Char :: Word8 -> Bool
 isBase64Char x = isAlphaNum x || (x == 10) || inClass "/+=" x
 
+-- |Parse a decimal number that matches the given predicate.
 decimalNum :: (Integral a, Read a) => (a -> Bool) -> Parser a
 decimalNum isOK =
   do n <- many1 decDigit
@@ -232,26 +251,33 @@ decimalNum isOK =
        [(x, "")] | isOK x -> return x
        _                  -> empty
 
+-- |Eat up some whitespace.
 whitespace :: Parser ()
 whitespace = many (satisfy (inClass " \t")) >> return () <?> "whitespace"
 
+-- |Eat up at least one character of whitespace.
 whitespace1 :: Parser ()
 whitespace1 = many1 (satisfy (inClass " \t")) >> return ()
 
+-- |Eat some amount of whitespace and then a newline.
 newline :: Parser ()
 newline = whitespace >> word8 10 >> return ()
 
+-- |Read a space.
 sp :: Parser Word8
 sp = char8 ' '
 
+-- |Read a newline.
 nl :: Parser Word8
 nl = char8 '\n'
 
 -- ----------------------------------------------------------------------------
 
+-- |Convert a series of bytes into a character string.
 toString :: [Word8] -> String
 toString = map (chr . fromIntegral)
 
+-- |Read a hex number into a bytestring in the obvious way.
 readHex :: String -> ByteString
 readHex []  = BS.empty
 readHex [_] = error "Attempted to readHex an odd-lengthed string."
@@ -259,6 +285,7 @@ readHex (a:b:rest) =
   let x = fromIntegral ((digitToInt a * 16) + digitToInt b)
   in BS.cons x (readHex rest)
 
+-- |Decode a series of characters as a Base64 stream.
 decodeBase64 :: [Word8] -> Parser ByteString
 decodeBase64 bytes =
   case decode (BS.pack (filter (/= 10) bytes)) of

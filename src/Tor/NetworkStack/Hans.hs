@@ -1,3 +1,4 @@
+-- |The way to integrate Tor with Hans.
 module Tor.NetworkStack.Hans(hansNetworkStack) where
 
 import Data.ByteString(ByteString)
@@ -10,6 +11,7 @@ import qualified Tor.DataFormat.TorAddress as TorAddr
 import Tor.NetworkStack(TorNetworkStack(TorNetworkStack))
 import qualified Tor.NetworkStack
 
+-- |Create a Tor-compatible network stack from the given Hans network stack.
 hansNetworkStack :: (HasTcp stack, HasDns stack) =>
                     stack ->
                     TorNetworkStack Socket Socket
