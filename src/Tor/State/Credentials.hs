@@ -29,7 +29,12 @@ import Data.ASN1.OID
 import Data.ByteString(ByteString)
 import Data.Hourglass
 import Data.Hourglass.Now
+#if MIN_VERSION_base(4,8,0)
 import Data.List(sortOn)
+#else
+import Data.List(sortBy)
+import Data.Ord(comparing)
+#endif
 import Data.Map.Strict(Map,empty,insertWith,toList)
 #if !MIN_VERSION_base(4,8,0)
 import Data.Monoid
@@ -300,3 +305,10 @@ isSignedBy cert bycert =
   toVerify HashSHA384 = verify (Just SHA384)
   toVerify HashSHA512 = verify (Just SHA512)
   toVerify _          = \ _ _ _ -> False
+
+
+#if !MIN_VERSION_base(4,8,0)
+sortOn :: Ord b => (a -> b) -> [a] -> [a]
+sortOn f =
+  map snd . sortBy (comparing fst) . map (\x -> let y = f x in y `seq` (y, x))
+#endif

@@ -62,7 +62,7 @@ import qualified Data.ByteString.Char8 as S8
 import qualified Data.ByteString.Lazy as L
 import Data.Either
 #if !MIN_VERSION_base(4,8,0)
-import Data.Foldable hiding (all)
+import Data.Foldable hiding (all,forM_)
 #endif
 import Data.IntSet(IntSet)
 import qualified Data.IntSet as IntSet
