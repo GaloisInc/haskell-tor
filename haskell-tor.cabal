@@ -23,11 +23,9 @@ source-repository head
 
 Flag network
   Description:        Use the base network library
-  Default:            True
 
 Flag hans
   Description:        Use the Haskell Network Stack (HaNS)
-  Default:            False
 
 library
   default-language:   Haskell2010
@@ -95,7 +93,7 @@ library
                       Tor.State.LinkManager,
                       Tor.State.Routers
 
-  if flag(network)
+  if flag(network) && !os(HaLVM)
     build-depends:    network                    >= 2.5   && < 2.7
     exposed-modules:  Tor.NetworkStack.System
   if flag(hans)
@@ -123,12 +121,12 @@ executable haskell-tor
                       x509                       >= 1.6   && < 1.8
   if flag(hans)
     build-depends:    hans                       >= 2.6   && < 2.8
-  if flag(network)
+  if flag(network) && !os(HaLVM)
     build-depends:    network                    >= 2.5   && < 2.7
   if os(HaLVM)
     build-depends:    HALVMCore                  >= 2.0   && < 2.4,
                       XenDevice                  >= 2.0   && < 2.4
-  if !flag(hans) && !flag(network)
+  if (!flag(hans) && !flag(network)) || (!flag(hans) && os(HaLVM))
     buildable:        False
 
 test-suite test-tor

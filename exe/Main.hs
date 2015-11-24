@@ -129,29 +129,28 @@ initializeSystem _ =
 # else
 #  error "No HaLVM-compatible network stack defined!"
 # endif
-#endif
-
-#if defined(VERSION_hans) && defined(VERSION_network)
+#else
+# if defined(VERSION_hans) && defined(VERSION_network)
 initializeSystem flags =
   case getTapDevice flags of
     Nothing ->
       do logger <- generateLogger flags
          return (MkNS systemNetworkStack, logger)
     Just tapName -> startTapNetworkStack flags tapName
-#elif defined(VERSION_hans)
+# elif defined(VERSION_hans)
 initializeSystem flags =
   case getTapDevice flags of
     Nothing -> fail ("No tap device specified, in HaNS-only implementation.")
     Just tapName -> startTapNetworkStack flags tapName
-#elif defined(VERSION_network)
+# elif defined(VERSION_network)
 initializeSystem flags =
   do logger <- generateLogger flags
      return (MkNS systemNetworkStack, logger)
-#else
-# error "Compilation error: No network stack available!"
-#endif
+# else
+#  error "Compilation error: No network stack available!"
+# endif
 
-#if defined(VERSION_hans)
+# if defined(VERSION_hans)
 startTapNetworkStack :: [Flag] -> String ->
                         IO (SomeNetworkStack, String -> IO ())
 startTapNetworkStack flags tapName =
@@ -168,6 +167,7 @@ startTapNetworkStack flags tapName =
             ipaddr <- dhcpDiscover ns mac
             logger ("Node has IP Address " ++ show ipaddr)
             return (MkNS (hansNetworkStack ns), logger)
+# endif
 #endif
 
 #if defined(VERSION_network)
