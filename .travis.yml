@@ -1,0 +1,47 @@
+language: c
+
+sudo: false
+
+matrix:
+  include:
+    - env: CABALVER=1.18 GHCVER=7.8.4 FLAGS="-fnetwork -fhans"
+      addons: {apt: {packages: [cabal-install-1.18,ghc-7.8.4], sources: [hvr-ghc]}}
+    - env: CABALVER=1.18 GHCVER=7.8.4 FLAGS="-f-network -fhans"
+      addons: {apt: {packages: [cabal-install-1.18,ghc-7.8.4], sources: [hvr-ghc]}}
+    - env: CABALVER=1.18 GHCVER=7.8.4 FLAGS="-fnetwork -f-hans"
+      addons: {apt: {packages: [cabal-install-1.18,ghc-7.8.4], sources: [hvr-ghc]}}
+    - env: CABALVER=1.18 GHCVER=7.8.4 FLAGS="-f-network -f-hans"
+      addons: {apt: {packages: [cabal-install-1.18,ghc-7.8.4], sources: [hvr-ghc]}}
+    - env: CABALVER=1.22 GHCVER=7.10.2 FLAGS="-fnetwork -fhans"
+      addons: {apt: {packages: [cabal-install-1.22,ghc-7.10.2],sources: [hvr-ghc]}}
+    - env: CABALVER=1.22 GHCVER=7.10.2 FLAGS="-f-network -fhans"
+      addons: {apt: {packages: [cabal-install-1.22,ghc-7.10.2],sources: [hvr-ghc]}}
+    - env: CABALVER=1.22 GHCVER=7.10.2 FLAGS="-fnetwork -f-hans"
+      addons: {apt: {packages: [cabal-install-1.22,ghc-7.10.2],sources: [hvr-ghc]}}
+    - env: CABALVER=1.22 GHCVER=7.10.2 FLAGS="-f-network -f-hans"
+      addons: {apt: {packages: [cabal-install-1.22,ghc-7.10.2],sources: [hvr-ghc]}}
+    - env: CABALVER=head GHCVER=head FLAGS="-fnetwork -fhans"
+      addons: {apt: {packages: [cabal-install-head,ghc-head],  sources: [hvr-ghc]}}
+    - env: CABALVER=head GHCVER=head FLAGS="-f-network -fhans"
+      addons: {apt: {packages: [cabal-install-head,ghc-head],  sources: [hvr-ghc]}}
+    - env: CABALVER=head GHCVER=head FLAGS="-fnetwork -f-hans"
+      addons: {apt: {packages: [cabal-install-head,ghc-head],  sources: [hvr-ghc]}}
+    - env: CABALVER=head GHCVER=head FLAGS="-f-network -f-hans"
+      addons: {apt: {packages: [cabal-install-head,ghc-head],  sources: [hvr-ghc]}}
+
+  allow_failures:
+   - env: CABALVER=head GHCVER=head
+
+before_install:
+ - export PATH=/opt/ghc/$GHCVER/bin:/opt/cabal/$CABALVER/bin:$PATH
+
+install:
+ - cabal sandbox init
+ - cabal update
+ - cabal install --only-dependencies --enable-tests ${FLAGS}
+ - cabal configure --enable-tests ${FLAGS}
+
+script:
+ - cabal build
+ - cabal check
+ - cabal test
