@@ -1,7 +1,11 @@
+{-# LANGUAGE CPP               #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE RecordWildCards   #-}
 module Test.TorCell(torCellTests) where
 
+#if !MIN_VERSION_base(4,8,0)
+import Control.Applicative
+#endif
 import Control.Monad
 import Crypto.Hash
 import Data.ASN1.OID
@@ -77,10 +81,8 @@ showHex' :: (Show a, Integral a) => a -> String
 showHex' x = showHex x ""
 
 instance Arbitrary ExtendSpec where
-  arbitrary = oneof [ ExtendIP4 <$> (BS.pack <$> replicateM 4 arbitrary )
-                                <*> arbitrary
-                    , ExtendIP6 <$> (BS.pack <$> replicateM 16 arbitrary)
-                                <*> arbitrary
+  arbitrary = oneof [ ExtendIP4 <$> genIP4 <*> arbitrary
+                    , ExtendIP6 <$> genIP6 <*> arbitrary
                     , ExtendDigest <$>
                         (BSC.pack <$>
                            replicateM 20 (elements "abcdef0123456789"))
@@ -136,7 +138,7 @@ instance Arbitrary RelayCell where
          , RelayConnected <$> arbitrary <*> legalTorAddress False
                           <*> arbitrary
          , RelaySendMe <$> arbitrary
-         , RelayExtend <$> arbitrary <*> (IP4 <$> genIP4)
+         , RelayExtend <$> arbitrary <*> genIP4
                        <*> arbitrary <*> arbitraryBS 186 <*> arbitraryBS 20
          , RelayExtended <$> arbitrary
                          <*> (BS.pack <$> replicateM 148 arbitrary)

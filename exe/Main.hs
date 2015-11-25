@@ -1,38 +1,42 @@
 {-# LANGUAGE CPP              #-}
 {-# LANGUAGE RecordWildCards  #-}
-import Data.ByteString.Char8(ByteString,pack)
-import qualified Data.ByteString.Lazy as L
-import Tor
-import Tor.Flags
-import Tor.NetworkStack
+import           Control.Concurrent
+import           Crypto.Random
+import           Data.ByteString.Char8(ByteString,pack)
+import qualified Data.ByteString                        as S
+import qualified Data.ByteString.Lazy                   as L
+import           Tor
+import           Tor.Circuit
+import           Tor.DataFormat.Helpers
+import           Tor.Flags
+import           Tor.Link
+import           Tor.NetworkStack
+import           Tor.RouterDesc
+import           Tor.State.Credentials
+import           Tor.State.Directories
+import           Tor.State.Routers
 
 #ifdef HaLVM_HOST_OS
-import Hans.Device.Xen
-import Hans.DhcpClient
-import Hans.NetworkStack hiding (listen, accept)
-import Hypervisor.Console
-import Hypervisor.XenStore
-import Tor.NetworkStack.Hans
-import XenDevice.NIC
-#else
-import Hans.Device.Tap
-import Hans.DhcpClient
-import Hans.NetworkStack hiding (listen, accept)
-import System.IO
-import Tor.NetworkStack.Hans
-import Tor.NetworkStack.System
+import           Hypervisor.Console
+import           Hypervisor.XenStore
+import           XenDevice.NIC
 #endif
 
-import qualified Data.ByteString as S
-import Tor.Link
-import Tor.Circuit
-import Tor.State.Credentials
-import Control.Concurrent
-import Crypto.Random
-import Tor.RouterDesc
-import Tor.DataFormat.Helpers
-import Tor.State.Directories
-import Tor.State.Routers
+#ifdef VERSION_hans
+import           Hans.DhcpClient
+import           Hans.NetworkStack hiding (listen, accept)
+import           Tor.NetworkStack.Hans
+# ifdef HaLVM_HOST_OS
+import           Hans.Device.Xen
+# else
+import           Hans.Device.Tap
+# endif
+#endif
+
+#ifdef VERSION_network
+import           System.IO
+import           Tor.NetworkStack.System
+#endif
 
 --main :: IO ()
 --main = runDefaultMain $ \ flags ->
@@ -104,6 +108,7 @@ readLoop sock =
 initializeSystem :: [Flag] ->
                     IO (SomeNetworkStack, String -> IO ())
 #ifdef HaLVM_HOST_OS
+# ifdef VERSION_hans
 initializeSystem _ =
   do con    <- initXenConsole
      xs     <- initXenStore
@@ -121,27 +126,51 @@ initializeSystem _ =
        case nics of
          []    -> threadDelay 1000000 >> findNIC xs
          (x:_) -> return x
+# else
+#  error "No HaLVM-compatible network stack defined!"
+# endif
 #else
+# if defined(VERSION_hans) && defined(VERSION_network)
 initializeSystem flags =
   case getTapDevice flags of
     Nothing ->
       do logger <- generateLogger flags
          return (MkNS systemNetworkStack, logger)
-    Just tapName ->
-      do mfd <- openTapDevice tapName
-         case mfd of
-           Nothing ->
-             fail ("Couldn't open tap device " ++ tapName)
-           Just fd ->
-             do ns <- newNetworkStack
-                logger <- generateLogger flags
-                let mac = read "52:54:00:12:34:56"
-                addDevice ns mac (tapSend fd) (tapReceiveLoop fd)
-                deviceUp ns mac
-                ipaddr <- dhcpDiscover ns mac
-                logger ("Node has IP Address " ++ show ipaddr)
-                return (MkNS (hansNetworkStack ns), logger)
+    Just tapName -> startTapNetworkStack flags tapName
+# elif defined(VERSION_hans)
+initializeSystem flags =
+  case getTapDevice flags of
+    Nothing -> fail ("No tap device specified, in HaNS-only implementation.")
+    Just tapName -> startTapNetworkStack flags tapName
+# elif defined(VERSION_network)
+initializeSystem flags =
+  do logger <- generateLogger flags
+     return (MkNS systemNetworkStack, logger)
+# else
+#  error "Compilation error: No network stack available!"
+# endif
 
+# if defined(VERSION_hans)
+startTapNetworkStack :: [Flag] -> String ->
+                        IO (SomeNetworkStack, String -> IO ())
+startTapNetworkStack flags tapName =
+  do mfd <- openTapDevice tapName
+     case mfd of
+       Nothing ->
+         fail ("Couldn't open tap device " ++ tapName)
+       Just fd ->
+         do ns <- newNetworkStack
+            let logger = makeLogger putStrLn
+            let mac = read "52:54:00:12:34:56"
+            addDevice ns mac (tapSend fd) (tapReceiveLoop fd)
+            deviceUp ns mac
+            ipaddr <- dhcpDiscover ns mac
+            logger ("Node has IP Address " ++ show ipaddr)
+            return (MkNS (hansNetworkStack ns), logger)
+# endif
+#endif
+
+#if defined(VERSION_network)
 generateLogger :: [Flag] -> IO (String -> IO ())
 generateLogger []                 = return (makeLogger (hPutStrLn stdout))
 generateLogger ((OutputLog fp):_) = do h <- openFile fp AppendMode

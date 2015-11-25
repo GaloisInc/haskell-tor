@@ -1,6 +1,10 @@
+{-# LANGUAGE CPP #-}
 module Test.HybridEncrypt(hybridEncryptionTest)
  where
 
+#if !MIN_VERSION_base(4,8,0)
+import Control.Applicative
+#endif
 import Crypto.PubKey.RSA
 import Control.Applicative
 import Control.Monad

@@ -36,6 +36,37 @@ This library uses cabal as its build system, and should work for Mac, Unix, and
 HaLVM-based installations. Windows support may work ... we just haven't tested
 it.
 
+### Understanding Network Stacks
+
+The haskell-tor library is built such that it can use one of two built-in
+network stacks and/or a third-party network stack that you provide. How you get
+each of these is governed by two flags that correspond to the two network
+stacks:
+
+  * `network` ensures that haskell-tor includes defaults for the standard,
+    sockets-based network stack as described in the Haskell `network` library.
+
+  * `hans` ensures that haskell-tor includes defaults for the Haskell
+    Network stack, which is a clean-slate networks stack that runs off raw
+    Ethernet frames.
+
+The defaults are a little complicated. To help try to sort things out, here is a
+table that describes all the combinations of flags, and what the default is for
+each platform:
+
+| Default | Platform | `network` | `hans` | Meaning                                 |
+|---------|----------|-----------|--------|-----------------------------------------|
+|         | Normal   | True      | True   | Support for both `hans` and `network`   |
+|   *     | Normal   | True      | False  | Support only `network`                  |
+|         | Normal   | False     | True   | Support only `hans`                     |
+|         | Normal   | False     | False  | No network stack support (BYONS)        |
+|         | HaLVM    | True      | True   | Support only `hans` (`network` ignored) |
+|         | HaLVM    | True      | False  | No network stack support (see prev.)    |
+|   *     | HaLVM    | False     | True   | Support only `hans`                     |
+|         | HaLVM    | False     | False  | No network stack support (BYONS)        |
+
+### Standard Cabal Constraints
+
 If you're building with the HaLVM, please add the constraints `--constraint "tls
 +hans"`, `--constraint "tls -network"`, and `-f-network` to your build flags,
 and if you're using the `integer-simple` library (for example, to avoid GPL
