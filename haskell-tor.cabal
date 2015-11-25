@@ -1,5 +1,5 @@
 name:                haskell-tor
-version:             0.1.0.0
+version:             0.1.1
 synopsis:            A Haskell Tor Node
 description:         An implementation of the Tor anonymity system in Haskell.
                      The core functionality is exported both as an application
@@ -23,9 +23,11 @@ source-repository head
 
 Flag network
   Description:        Use the base network library
+  Default:            True
 
 Flag hans
   Description:        Use the Haskell Network Stack (HaNS)
+  Default:            False
 
 library
   default-language:   Haskell2010
@@ -102,6 +104,7 @@ library
 
 executable haskell-tor
   main-is:            Main.hs
+  other-modules:      Tor.Flags
   default-language:   Haskell2010
   ghc-options:        -Wall
   hs-source-dirs:     exe
@@ -125,6 +128,8 @@ executable haskell-tor
   if os(HaLVM)
     build-depends:    HALVMCore                  >= 2.0   && < 2.4,
                       XenDevice                  >= 2.0   && < 2.4
+  if !flag(hans) && !flag(network)
+    buildable:        False
 
 test-suite test-tor
   type:               exitcode-stdio-1.0
