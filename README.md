@@ -54,16 +54,16 @@ The defaults are a little complicated. To help try to sort things out, here is a
 table that describes all the combinations of flags, and what the default is for
 each platform:
 
-| Default | Platform | `network` | `hans` | Meaning                               |
-|---------|----------|-----------|--------|---------------------------------------|
-|         | Normal   | True      | True   | Support for both `hans` and `network` |
-|   *     | Normal   | True      | False  | Support only `network`                |
-|         | Normal   | False     | True   | Support only `hans`                   |
-|         | Normal   | False     | False  | No network stack support (BYONS)      |
-|         | HaLVM    | True      | True   | ILLEGAL (Will not build)              |
-|         | HaLVM    | True      | False  | ILLEGAL (Will not build)              |
-|   *     | HaLVM    | False     | True   | Support only `hans`                   |
-|         | HaLVM    | False     | False  | No network stack support (BYONS)      |
+| Default | Platform | `network` | `hans` | Meaning                                 |
+|---------|----------|-----------|--------|-----------------------------------------|
+|         | Normal   | True      | True   | Support for both `hans` and `network`   |
+|   *     | Normal   | True      | False  | Support only `network`                  |
+|         | Normal   | False     | True   | Support only `hans`                     |
+|         | Normal   | False     | False  | No network stack support (BYONS)        |
+|         | HaLVM    | True      | True   | Support only `hans` (`network` ignored) |
+|         | HaLVM    | True      | False  | No network stack support (see prev.)    |
+|   *     | HaLVM    | False     | True   | Support only `hans`                     |
+|         | HaLVM    | False     | False  | No network stack support (BYONS)        |
 
 ### Standard Cabal Constraints
 
