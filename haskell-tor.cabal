@@ -1,5 +1,5 @@
 name:                haskell-tor
-version:             0.1.1
+version:             0.1.2
 synopsis:            A Haskell Tor Node
 description:         An implementation of the Tor anonymity system in Haskell.
                      The core functionality is exported both as an application
@@ -137,6 +137,12 @@ test-suite test-tor
   hs-source-dirs:     test
   default-language:   Haskell2010
   other-extensions:   CPP, FlexibleInstances, TypeSynonymInstances
+  other-modules:
+                      Test.CipherSuite,
+                      Test.Handshakes,
+                      Test.HybridEncrypt,
+                      Test.Standard,
+                      Test.TorCell
   ghc-options:        -fno-warn-orphans
   build-depends:
                       asn1-types                 >= 0.2   && < 0.4,
