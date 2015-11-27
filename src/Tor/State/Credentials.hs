@@ -1,4 +1,5 @@
 -- |Credential management for a Tor node.
+{-# LANGUAGE CPP               #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
 module Tor.State.Credentials(
@@ -18,6 +19,9 @@ module Tor.State.Credentials(
  where
 
 import Control.Concurrent
+#if MIN_VERSION_cryptonite(0,9,0)
+import Crypto.Error
+#endif
 import Crypto.Hash
 import Crypto.Hash.Easy
 import Crypto.PubKey.Curve25519 as Curve
@@ -28,7 +32,6 @@ import Crypto.Random
 import Data.ASN1.OID
 import Data.ByteString(ByteString)
 import Data.Hourglass
-import Data.Hourglass.Now
 #if MIN_VERSION_base(4,8,0)
 import Data.List(sortOn)
 #else
@@ -43,6 +46,7 @@ import Data.String
 import Data.Word
 import Data.X509
 import Hexdump
+import System.Hourglass
 import Tor.DataFormat.TorAddress
 import Tor.Options
 import Tor.RNG
@@ -68,7 +72,7 @@ newtype Credentials = Credentials (MVar CredentialState)
 newCredentials :: TorOptions -> IO Credentials
 newCredentials opts =
   do g   <- drgNew
-     now <- getCurrentTime
+     now <- dateCurrent
      let s = generateState g opts now
      creds <- Credentials `fmap` newMVar s
      logMsg "Credentials created."
@@ -100,7 +104,7 @@ getTLSKey = getCredentials credTLS
 getCredentials :: (CredentialState -> a) -> Credentials -> IO a
 getCredentials getter (Credentials stateMV) =
   do state  <- takeMVar stateMV
-     now    <- getCurrentTime
+     now    <- dateCurrent
      let state' = updateKeys state now
      putMVar stateMV $! state'
      return (getter state')
@@ -125,7 +129,7 @@ getRouterDesc (Credentials stateMV) =
            (signCert, _) = credIdentity state
            PubKeyRSA signkey = certPubKey (signedObject (getSigned signCert))
            (ntorkey, _) = credOnionNTor state
-       now <- getCurrentTime
+       now <- dateCurrent
        return (credBaseDesc state) {
          routerIPv4Address = ip4addr
        , routerFingerprint = keyHash' sha1 signkey
@@ -219,11 +223,17 @@ maybeRegenOnion force now state | force || (now > expiration) = (state', True)
   --
   findKey rng =
     let (bytes, rng') = withRandomBytes rng 32 id
-    in case secretKey (bytes :: ByteString) of
+    in case toEither (secretKey (bytes :: ByteString)) of
          Left _        -> findKey rng'
          Right privkey -> (privkey, rng')
   (privntor, g'') = findKey g'
   pubntor = toPublic privntor
+#if MIN_VERSION_cryptonite(0,9,0)
+  toEither (CryptoPassed x) = Right x
+  toEither (CryptoFailed e) = Left (show e)
+#else
+  toEither = id
+#endif
   --
   state' = state{ credRNG = g'', credNextSerialNum = serial + 1
                 , credOnion = (cert, PrivKeyRSA priv)
