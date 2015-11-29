@@ -26,7 +26,6 @@ import Data.Bits
 import Data.Serialize.Get
 import Data.ByteString(ByteString,unpack)
 import Data.Hourglass
-import Data.Hourglass.Now
 import Data.List
 #if !MIN_VERSION_base(4,8,0)
     hiding (find)
@@ -35,6 +34,7 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe
 import Data.Word
 import MonadLib
+import System.Hourglass
 import Tor.DataFormat.Consensus
 import Tor.DataFormat.RelayCell
 import Tor.DataFormat.TorAddress
@@ -314,7 +314,7 @@ computeNextTime consensus g = (timeAdd lowest diffAmt, g')
 
 waitUntil :: DateTime -> IO ()
 waitUntil time =
-  do now <- getCurrentTime
+  do now <- dateCurrent
      if now > time
         then return ()
         else do threadDelay 100000 -- (5 * 60 * 1000000) -- 5 minutes

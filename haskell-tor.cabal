@@ -1,5 +1,5 @@
 name:                haskell-tor
-version:             0.1.1
+version:             0.1.2
 synopsis:            A Haskell Tor Node
 description:         An implementation of the Tor anonymity system in Haskell.
                      The core functionality is exported both as an application
@@ -49,10 +49,10 @@ library
                       bytestring                 >= 0.10  && < 0.11,
                       cereal                     >= 0.4   && < 0.6,
                       containers                 >= 0.5   && < 0.7,
-                      cryptonite                 >= 0.6   && < 0.8,
+                      cryptonite                 >= 0.6   && < 0.10,
                       fingertree                 >= 0.1   && < 0.3,
                       hourglass                  >= 0.2.9 && < 0.4,
-                      memory                     >= 0.7   && < 0.9,
+                      memory                     >= 0.7   && < 0.11,
                       monadLib                   >= 3.7   && < 3.9,
                       pretty-hex                 >= 1.0   && < 1.2,
                       pure-zlib                  >= 0.4   && < 0.5,
@@ -67,7 +67,6 @@ library
                       Paths_haskell_tor
 
   exposed-modules:
-                      Data.Hourglass.Now,
                       Tor,
                       Tor.Circuit,
                       Tor.DataFormat.Consensus,
@@ -113,10 +112,10 @@ executable haskell-tor
                       base                       >= 4.7   && < 5.0,
                       base64-bytestring          >= 1.0   && < 1.2,
                       bytestring                 >= 0.10  && < 0.11,
-                      cryptonite                 >= 0.6   && < 0.8,
+                      cryptonite                 >= 0.6   && < 0.10,
                       haskell-tor                >= 0.1   && < 0.3,
                       hourglass                  >= 0.2.9 && < 0.4,
-                      memory                     >= 0.7   && < 0.9,
+                      memory                     >= 0.7   && < 0.11,
                       time                       >= 1.4   && < 1.6,
                       tls                        >= 1.3.2 && < 1.5,
                       x509                       >= 1.6   && < 1.8
@@ -137,18 +136,24 @@ test-suite test-tor
   hs-source-dirs:     test
   default-language:   Haskell2010
   other-extensions:   CPP, FlexibleInstances, TypeSynonymInstances
+  other-modules:
+                      Test.CipherSuite,
+                      Test.Handshakes,
+                      Test.HybridEncrypt,
+                      Test.Standard,
+                      Test.TorCell
   ghc-options:        -fno-warn-orphans
   build-depends:
                       asn1-types                 >= 0.2   && < 0.4,
                       base                       >= 4.7   && < 5.0,
                       binary                     >= 0.7   && < 0.9,
                       bytestring                 >= 0.10  && < 0.11,
-                      cryptonite                 >= 0.6   && < 0.8,
+                      cryptonite                 >= 0.6   && < 0.10,
                       haskell-tor                >= 0.1   && < 0.3,
                       hourglass                  >= 0.2.9 && < 0.4,
                       HUnit                      >= 1.2   && < 1.4,
                       QuickCheck                 >= 2.7   && < 2.9,
-                      memory                     >= 0.7   && < 0.9,
+                      memory                     >= 0.7   && < 0.11,
                       pretty-hex                 >= 1.0   && < 1.4,
                       test-framework             >= 0.8   && < 0.10,
                       test-framework-hunit       >= 0.3   && < 0.5,

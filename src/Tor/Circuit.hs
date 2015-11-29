@@ -949,14 +949,14 @@ advanceNTorHandshake me littleB circId bstr0 g0
       (g0, Left "Called advance, but I don't support NTor handshakes.")
   | (nodeid /= routerFingerprint me) || (Just bigB /= routerNTorOnionKey me) =
       (g0, Left "Called advance, but their fingerprint doesn't match me.")
-  | Left err <- publicKey keyid =
+  | Left err <- toEither (publicKey keyid) =
       (g0, Left ("Couldn't decode bigX in advance: " ++ err))
   | otherwise = (g1, Right (msg,fenc,benc))
  where
   (nodeid, bstr1)       = S.splitAt 20 bstr0
   (keyid,  xpub)        = S.splitAt 32 bstr1
-  Right bigB            = publicKey keyid
-  Right bigX            = publicKey xpub
+  Right bigB            = toEither (publicKey keyid)
+  Right bigX            = toEither (publicKey xpub)
   ((bigY, littleY), g1) = withDRG g0 generate25519
   secret_input          = S.concat [curveExp bigX littleY,
                                     curveExp bigX littleB,
@@ -977,17 +977,22 @@ advanceNTorHandshake me littleB circId bstr0 g0
 completeNTorHandshake :: RouterDesc -> Curve25519Pair -> ByteString ->
                          Either String (CryptoData, CryptoData)
 completeNTorHandshake router (bigX, littleX) bstr
-  | Nothing <- routerNTorOnionKey router = Left "Internal error complete/ntor"
-  | Left err <- publicKey public_pk      = Left ("Couldn't decode bigY: "++err)
-  | Left err <- publicKey server_ntorid  = Left ("Couldn't decode bigB: "++err)
-  | auth /= auth'                        = Left "Authorization failure"
-  | otherwise                            = Right res
+  | Nothing <- routerNTorOnionKey router =
+      Left "Internal error complete/ntor"
+  | Left err <- toEither (publicKey public_pk) =
+      Left ("Couldn't decode bigY: "++err)
+  | Left err <- toEither (publicKey server_ntorid) =
+      Left ("Couldn't decode bigB: "++err)
+  | auth /= auth' =
+      Left "Authorization failure"
+  | otherwise =
+      Right res
  where
   nodeid             = routerFingerprint router
   (public_pk, auth)  = S.splitAt 32 bstr
   Just server_ntorid = routerNTorOnionKey router
-  Right bigY         = publicKey public_pk
-  Right bigB         = publicKey server_ntorid
+  Right bigY         = toEither (publicKey public_pk)
+  Right bigB         = toEither (publicKey server_ntorid)
   secret_input       = S.concat [curveExp bigY littleX, curveExp bigB littleX,
                                  nodeid, convert bigB, convert bigX, convert bigY,
                                  protoid]
@@ -1008,7 +1013,7 @@ type Curve25519Pair = (Curve.PublicKey, Curve.SecretKey)
 generate25519 :: MonadRandom m => m Curve25519Pair
 generate25519 =
   do bytes <- getRandomBytes 32
-     case secretKey (bytes :: ByteString) of
+     case toEither (secretKey (bytes :: ByteString)) of
        Left err ->
          fail ("Couldn't convert to a secret key: " ++ show err)
        Right privKey ->
@@ -1062,3 +1067,12 @@ modifyMVar' mv f = modifyMVar mv (return . f)
 
 modifyMVar_' :: MVar a -> (a -> a) -> IO ()
 modifyMVar_' mv f = modifyMVar_ mv (return . f)
+
+#if MIN_VERSION_cryptonite(0,9,0)
+toEither :: CryptoFailable a -> Either String a
+toEither (CryptoPassed x) = Right x
+toEither (CryptoFailed e) = Left (show e)
+#else
+toEither :: Either String a -> Either String a
+toEither = id
+#endif

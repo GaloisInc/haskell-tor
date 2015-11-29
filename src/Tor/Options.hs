@@ -12,8 +12,8 @@ module Tor.Options(
  where
 
 import Data.Hourglass
-import Data.Hourglass.Now
 import Data.Word
+import System.Hourglass
 import Tor.RouterDesc
 
 -- |How the node should be set up during initialization. For each of these
@@ -132,7 +132,7 @@ defaultTorExitOptions  = TorExitOptions {
 -- NOTE: The default value for the logger is (makeLogger putStrLn).
 makeLogger :: (String -> IO ()) -> String -> IO ()
 makeLogger out msg =
-  do now <- getCurrentTime
+  do now <- dateCurrent
      out (timePrint timeFormat now ++ msg)
  where
    timeFormat = [Format_Text '[', Format_Year4, Format_Text '-', Format_Month2,

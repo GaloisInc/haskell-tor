@@ -35,7 +35,6 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import Data.ByteString.Char8(pack)
 import Data.Hourglass
-import Data.Hourglass.Now
 import Data.IORef
 import Data.Map.Strict(Map)
 import qualified Data.Map.Strict as Map
@@ -49,6 +48,7 @@ import Data.X509 hiding (HashSHA1, HashSHA256)
 import Data.X509.CertificateStore
 import Network.TLS hiding (Credentials)
 import qualified Network.TLS as TLS
+import System.Hourglass
 import Tor.DataFormat.RelayCell
 import Tor.DataFormat.TorAddress
 import Tor.DataFormat.TorCell
@@ -109,7 +109,7 @@ initLink :: HasBackend s =>
             RouterDesc ->
             IO TorLink
 initLink ns creds rngMV llog them =
-  do now <- getCurrentTime
+  do now <- dateCurrent
      let validity = (now, now `timeAdd` mempty{ durationHours = 2 })
      (idCert, idKey) <- getSigningKey creds
      (authPriv, authCert) <- modifyMVar rngMV
@@ -246,7 +246,7 @@ getRespInitialMsgs tls (CertificateChain tlsCerts) =
          idCert' = signedObject (getSigned idCert)
      --    * Both certificates have validAfter and validUntil dates that
      --      are not expired.
-     now      <- getCurrentTime
+     now      <- dateCurrent
      when (certExpired linkCert' now) $ fail "Link certificate expired."
      when (certExpired idCert' now)   $ fail "Identity certificate expired."
      --    * The certified key in the Link certificate matches the link key
@@ -446,7 +446,7 @@ acceptLink :: HasBackend s =>
               s -> TorAddress ->
               IO TorLink
 acceptLink creds routerDB rngMV llog sock who =
- do now <- getCurrentTime
+ do now <- dateCurrent
     let validity = (now, now `timeAdd` mempty{ durationHours = 2 })
     (idCert, idKey) <- getSigningKey creds
     let idCert' = signedObject (getSigned idCert)
@@ -473,7 +473,7 @@ acceptLink creds routerDB rngMV llog sock who =
     sendData tls authcbstr
     -- "... and a NETINFO cell (4.5) "
     others <- getAddresses creds
-    epochsec <- (fromElapsed . timeGetElapsed) <$> getCurrentTime
+    epochsec <- fromElapsed <$> timeCurrent
     sendData tls (putCell (NetInfo epochsec who others))
     -- "At this point the initiator may send a NETINFO cell if it does not
     -- wish to authenticate, or a CERTS cell, an AUTHENTICATE cell, and a
