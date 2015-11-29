@@ -1068,10 +1068,11 @@ modifyMVar' mv f = modifyMVar mv (return . f)
 modifyMVar_' :: MVar a -> (a -> a) -> IO ()
 modifyMVar_' mv f = modifyMVar_ mv (return . f)
 
-toEither :: CryptoFailable a -> Either String a
 #if MIN_VERSION_cryptonite(0,9,0)
+toEither :: CryptoFailable a -> Either String a
 toEither (CryptoPassed x) = Right x
 toEither (CryptoFailed e) = Left (show e)
 #else
+toEither :: Either String a -> Either String a
 toEither = id
 #endif
