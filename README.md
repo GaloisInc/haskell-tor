@@ -8,7 +8,7 @@
 
 Tor is a secure onion routing network for providing anonymized access to both
 the public Internet as well as a series of Tor-internal hidden services. Much
-more information about Tor can be found at http://torproject.org.
+more information about Tor can be found at https://www.torproject.org.
 
 Many thanks to all the hard work that project has put into developing and
 evangelizing Tor.
