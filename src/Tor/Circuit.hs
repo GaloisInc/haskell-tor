@@ -898,7 +898,7 @@ computeTAPValues :: PrivateNumber -> PublicNumber ->
 computeTAPValues b ga = (L.toStrict kh, (encsf, fhash), (encsb, bhash))
  where
   SharedKey k0 = getShared oakley2 b ga
-  (kh, rest1)  = L.splitAt 20 (kdfTor (i2ospOf_ 128 k0))
+  (kh, rest1)  = L.splitAt 20 (kdfTor (convert k0))
   (df,  rest2) = L.splitAt 20  rest1
   (db,  rest3) = L.splitAt 20  rest2
   (kf,  rest4) = L.splitAt 16  rest3

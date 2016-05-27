@@ -24,8 +24,7 @@ data SomeNetworkStack = forall lsock sock . HasBackend sock =>
 -- socket. 
 data TorNetworkStack lsock sock = TorNetworkStack {
        connect    :: String -> Word16       -> IO (Maybe sock)
-       -- |Lookup the given hostname and return any IP6 (Left) or IP4 (Right)
-       -- addresses associated with it.
+       -- |Lookup the given hostname and return any addresses associated with it.
      , getAddress :: String                 -> IO [TorAddress]
      , listen     :: Word16                 -> IO lsock
      , accept     :: lsock                  -> IO (sock, TorAddress)

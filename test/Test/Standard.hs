@@ -17,7 +17,10 @@ arbitraryRNG :: Gen ChaChaDRG
 arbitraryRNG = drgNew
 
 arbitraryBS :: Int -> Gen ByteString
-arbitraryBS x = pack <$> replicateM x arbitrary
+arbitraryBS x = pack <$> vectorOf x arbitrary
+
+instance Arbitrary ByteString where
+  arbitrary = sized arbitraryBS
 
 serialProp :: Eq a => Get a -> (a -> Put) -> a -> Bool
 serialProp getter putter x =

@@ -39,7 +39,7 @@ library
 
   build-depends:
                       array                      >= 0.5   && < 0.7,
-                      asn1-encoding              >= 0.9   && < 0.11,
+                      asn1-encoding              >= 0.9.3 && < 0.11,
                       asn1-types                 >= 0.3   && < 0.5,
                       async                      >= 2.0.2 && < 2.2,
                       attoparsec                 >= 0.13  && < 0.15,
@@ -47,17 +47,17 @@ library
                       base64-bytestring          >= 1.0   && < 1.2,
                       binary                     >= 0.7.1 && < 0.9,
                       bytestring                 >= 0.10  && < 0.11,
-                      cereal                     >= 0.4   && < 0.6,
+                      cereal                     >= 0.5.1 && < 0.6,
                       containers                 >= 0.5   && < 0.7,
-                      cryptonite                 >= 0.6   && < 0.10,
+                      cryptonite                 >= 0.14  && < 0.20,
                       fingertree                 >= 0.1   && < 0.3,
                       hourglass                  >= 0.2.9 && < 0.4,
-                      memory                     >= 0.7   && < 0.11,
+                      memory                     >= 0.13  && < 0.17,
                       monadLib                   >= 3.7   && < 3.9,
                       pretty-hex                 >= 1.0   && < 1.2,
                       pure-zlib                  >= 0.4   && < 0.5,
                       time                       >= 1.4   && < 1.6,
-                      tls                        >= 1.3.2 && < 1.5,
+                      tls                        >= 1.3.8 && < 1.5,
                       x509                       >= 1.6   && < 1.8,
                       x509-store                 >= 1.6   && < 1.8
 
@@ -107,17 +107,17 @@ executable haskell-tor
   ghc-options:        -Wall
   hs-source-dirs:     exe
   build-depends:
-                      asn1-encoding              >= 0.8   && < 0.10,
+                      asn1-encoding              >= 0.9.3 && < 0.10,
                       asn1-types                 >= 0.2   && < 0.4,
                       base                       >= 4.7   && < 5.0,
                       base64-bytestring          >= 1.0   && < 1.2,
                       bytestring                 >= 0.10  && < 0.11,
-                      cryptonite                 >= 0.6   && < 0.10,
+                      cryptonite                 >= 0.14  && < 0.20,
                       haskell-tor                >= 0.1   && < 0.3,
                       hourglass                  >= 0.2.9 && < 0.4,
                       memory                     >= 0.7   && < 0.11,
                       time                       >= 1.4   && < 1.6,
-                      tls                        >= 1.3.2 && < 1.5,
+                      tls                        >= 1.3.8 && < 1.5,
                       x509                       >= 1.6   && < 1.8
   if flag(hans)
     build-depends:    hans                       >= 2.6   && < 2.8
@@ -143,6 +143,7 @@ test-suite test-tor
                       Test.CipherSuite,
                       Test.Handshakes,
                       Test.HybridEncrypt,
+                      Test.Network,
                       Test.Standard,
                       Test.TorCell
   ghc-options:        -fno-warn-orphans -fhpc
@@ -155,20 +156,20 @@ test-suite test-tor
                       base64-bytestring          >= 1.0   && < 1.2,
                       binary                     >= 0.7   && < 0.9,
                       bytestring                 >= 0.10  && < 0.11,
-                      cereal                     >= 0.4   && < 0.6,
+                      cereal                     >= 0.5.1 && < 0.6,
                       containers                 >= 0.5   && < 0.7,
-                      cryptonite                 >= 0.6   && < 0.10,
+                      cryptonite                 >= 0.14  && < 0.20,
                       hourglass                  >= 0.2.9 && < 0.4,
-                      HUnit                      >= 1.2   && < 1.4,
-                      QuickCheck                 >= 2.7   && < 2.9,
-                      memory                     >= 0.7   && < 0.11,
+                      HUnit                      >= 1.3.1 && < 1.5,
+                      QuickCheck                 >= 2.8.2 && < 2.10,
+                      memory                     >= 0.13  && < 0.16,
                       monadLib                   >= 3.7   && < 3.9,
                       pretty-hex                 >= 1.0   && < 1.4,
                       pure-zlib                  >= 0.4   && < 0.5,
                       test-framework             >= 0.8   && < 0.10,
                       test-framework-hunit       >= 0.3   && < 0.5,
                       test-framework-quickcheck2 >= 0.3   && < 0.5,
-                      tls                        >= 1.3.2 && < 1.5,
+                      tls                        >= 1.3.8 && < 1.5,
                       time                       >= 1.4   && < 1.6,
                       x509                       >= 1.6   && < 1.8,
                       x509-store                 >= 1.6   && < 1.8

@@ -1,20 +1,10 @@
 {-# LANGUAGE CPP              #-}
 {-# LANGUAGE RecordWildCards  #-}
-import           Control.Concurrent
-import           Crypto.Random
 import           Data.ByteString.Char8(ByteString,pack)
-import qualified Data.ByteString                        as S
 import qualified Data.ByteString.Lazy                   as L
 import           Tor
-import           Tor.Circuit
-import           Tor.DataFormat.Helpers
 import           Tor.Flags
-import           Tor.Link
 import           Tor.NetworkStack
-import           Tor.RouterDesc
-import           Tor.State.Credentials
-import           Tor.State.Directories
-import           Tor.State.Routers
 
 #ifdef HaLVM_HOST_OS
 import           Hypervisor.Console

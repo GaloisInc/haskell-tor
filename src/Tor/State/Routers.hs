@@ -4,6 +4,7 @@ module Tor.State.Routers(
          RouterDB
        , RouterRestriction(..)
        , newRouterDatabase
+       , newTestRouterDatabase
        , findRouter
        , getRouter
        , meetsRestrictions
@@ -72,6 +73,12 @@ newRouterDatabase ns ddb logMsg =
   do rdbMV <- newEmptyMVar
      _ <- forkIO (updateConsensus ns ddb logMsg rdbMV)
      return (RouterDB rdbMV)
+
+-- |Build a new router database containing the given router descriptions. This
+-- should only be used for testing purposes.
+newTestRouterDatabase :: [RouterDesc] ->  IO RouterDB
+newTestRouterDatabase descs = RouterDB <$> newMVar (RDB 0 arr)
+ where arr = listArray (0, fromIntegral (length descs)) descs
 
 -- |Find a router given its fingerprint.
 findRouter :: RouterDB -> [ExtendSpec] -> IO (Maybe RouterDesc)

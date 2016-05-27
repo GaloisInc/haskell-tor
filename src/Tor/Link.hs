@@ -406,6 +406,7 @@ clientTLSOpts target creds ccio = ClientParams {
     , supportedSession             = False
     , supportedFallbackScsv        = True
     , supportedClientInitiatedRenegotiation = True
+    , supportedEmptyPacket         = True
     }
   }
  where
@@ -612,6 +613,7 @@ serverTLSOpts creds = ServerParams {
       onClientCertificate          = const (return CertificateUsageAccept) -- FIXME?
     , onUnverifiedClientCert       = return True -- FIXME?
     , onCipherChoosing             = chooseTorCipher
+    , onServerNameIndication       = const (return creds)
     , onSuggestNextProtocols       = return Nothing
     , onNewHandshake               = \ _ -> return True -- FIXME?
     , onALPNClientSuggest          = Nothing
@@ -629,6 +631,7 @@ serverTLSOpts creds = ServerParams {
     , supportedSession             = False
     , supportedFallbackScsv        = True
     , supportedClientInitiatedRenegotiation = True
+    , supportedEmptyPacket         = True
     }
   }
  where

@@ -1,4 +1,4 @@
-module Test.Crypto(cryptoTests) where
+module Test.Crypto(testCrypto) where
 
 import           Data.Bits
 import           Data.Char
@@ -10,8 +10,8 @@ import           Test.Framework
 import           Test.Framework.Providers.HUnit
 import           Test.HUnit(assertEqual)
 
-cryptoTests :: Test
-cryptoTests =
+testCrypto :: Test
+testCrypto =
   testGroup "Crypto tests" [
     testGroup "Hash tests" (
        encodeSHATests "SHA-1"
@@ -23,8 +23,8 @@ cryptoTests =
     ++ encodeSHATests "SHA-256 Lazy"
         sha256lazy sha256_spec_tests sha256_nist_tests
     )
-  , testGroup "RSA certificate hashing tests" (
-    )
+  , testGroup "RSA certificate hashing tests" [
+    ]
   ]
 
 -- These tests are stolen from my SHA library. Wheeee!

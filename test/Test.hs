@@ -1,14 +1,18 @@
-import Test.Crypto
-import Test.Framework.Runners.Console
-import Test.Handshakes
-import Test.HybridEncrypt
-import Test.TorCell
+import Test.Crypto(testCrypto)
+import Test.Framework.Runners.Console(defaultMain)
+-- import Test.Handshakes
+-- import Test.HybridEncrypt
+-- import Test.Link
+import Test.Network(testTestInternet)
+-- import Test.TorCell
 
 main :: IO ()
 main =
   defaultMain [
-    cryptoTests
-  , torCellTests
-  , hybridEncryptionTest
-  , handshakeTests
+    testCrypto
+--  , torCellTests
+--  , hybridEncryptionTest
+--  , handshakeTests
+  , testTestInternet
+--  , linkTests
   ]
