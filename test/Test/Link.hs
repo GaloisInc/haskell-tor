@@ -1,42 +1,43 @@
-module Test.Link(linkTests)
+module Test.Link(testLinks)
  where
 
-import Control.Concurrent.MVar(MVar, newMVar)
-import Control.Exception(SomeException)
+import Control.Concurrent.Async(async, waitBoth)
+import Control.Concurrent.MVar(MVar, newEmptyMVar, putMVar, takeMVar)
+import Control.Exception(SomeException, try)
 import Control.Monad(unless)
 import Crypto.Random(drgNewTest)
 import Data.Either(isRight)
 import Data.Word(Word64)
 import Test.Framework(Test, testGroup)
 import Test.Framework.Providers.QuickCheck2(testProperty)
-import Test.Network(initializeInternet, createNode, routerDatabase)
+import Test.Network(InternetSeed, testTestInternet)
+import Test.Network(initializeInternet, createNode, routerDatabase, getRNG)
 import Test.QuickCheck(Property)
 import Test.QuickCheck.Monadic(monadicIO, run, assert)
+import Test.Standard(testOptions)
 import Tor.DataFormat.TorAddress
 import Tor.Link(initLink, acceptLink)
 import Tor.NetworkStack(TorNetworkStack(..))
-import Tor.Options(defaultTorOptions)
 import Tor.RouterDesc(RouterDesc(..))
 
-linkTests :: Test
-linkTests =
+testLinks :: Test
+testLinks =
   testGroup "Link-level tests" [
-    testProperty "Link connections work" prop_linkConnect
+    testTestInternet
+  , testProperty "Link connections work" prop_linkConnect
   ]
 
-prop_linkConnect :: (Word64, Word64, Word64, Word64, Word64) ->
-                    Property
+prop_linkConnect :: InternetSeed -> Property
 prop_linkConnect seed =
-  monadicIO $ do internet             <- run $ initializeInternet seed
-                 (descA, credsA, nsA) <- run $ createNode defaultTorOptions internet
-                 (descB, credsB, nsB) <- run $ createNode defaultTorOptions internet
-                 rdb                  <- run $ routerDatabase internet
-                 rng                  <- run $ newMVar (drgNewTest seed)
-                 results <- run $ parallelRun [
-                              connectToB  nsA credsA rng descB
-                            , acceptFromA nsB credsB rng descA descB rdb
-                            ]
-                 assert (all isRight results)
+  monadicIO $
+    do internet             <- run (initializeInternet seed)
+       (descA, credsA, nsA) <- run (createNode internet testOptions)
+       (descB, credsB, nsB) <- run (createNode internet testOptions)
+       rdb                  <- run (routerDatabase internet)
+       cona <- run (async (connectToB  nsA credsA (getRNG internet) descB))
+       acca <- run (async (acceptFromA nsB credsB (getRNG internet) descA descB rdb))
+       run (waitBoth cona acca)
+       assert True -- An exception would be thrown if there was a problem
  where
   connectToB nsA credsA rng descB =
     initLink nsA credsA rng (const (return ())) descB
@@ -52,5 +53,3 @@ prop_linkConnect seed =
            fail "Connection from non-IP4 address?"
        acceptLink credsB routerDB rng (const (return ())) sock addr
 
-parallelRun :: [IO a] -> IO [Either SomeException a]
-parallelRun actions = undefined

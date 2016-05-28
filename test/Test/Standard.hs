@@ -12,6 +12,7 @@ import Data.ByteArray(pack)
 import Data.ByteString(ByteString)
 import qualified Data.ByteString.Lazy as BS
 import Test.QuickCheck
+import Tor.Options
 
 arbitraryRNG :: Gen ChaChaDRG
 arbitraryRNG = drgNew
@@ -30,3 +31,6 @@ serialProp getter putter x =
 
 instance MonadRandom Gen where
   getRandomBytes x = pack <$> replicateM x arbitrary
+
+testOptions :: TorOptions
+testOptions = defaultTorOptions { torLog = const (return ()) }

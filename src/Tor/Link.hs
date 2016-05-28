@@ -408,6 +408,10 @@ clientTLSOpts target creds ccio = ClientParams {
     , supportedClientInitiatedRenegotiation = True
     , supportedEmptyPacket         = True
     }
+  , clientDebug                    = DebugParams {
+      debugSeed                    = Nothing
+    , debugPrintSeed               = const (return ())
+    }
   }
  where
   getRealCreds (TLS.Credentials [])    = Nothing
@@ -456,6 +460,7 @@ acceptLink creds routerDB rngMV llog sock who =
     let tcreds = TLS.Credentials [(CertificateChain [linkCert, idCert],
                                    PrivKeyRSA linkPriv)]
     tls <- contextNew sock (serverTLSOpts tcreds)
+    handshake tls
     (versions, iversstr) <- getVersions tls
     unless (4 `elem` versions) $ fail "Link doesn't support version 4."
     -- "The responder sends a VERSIONS cell, ..."
@@ -632,6 +637,10 @@ serverTLSOpts creds = ServerParams {
     , supportedFallbackScsv        = True
     , supportedClientInitiatedRenegotiation = True
     , supportedEmptyPacket         = True
+    }
+  , serverDebug                    = DebugParams {
+      debugSeed                    = Nothing
+    , debugPrintSeed               = const (return ())
     }
   }
  where

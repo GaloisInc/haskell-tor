@@ -6,6 +6,7 @@ module Test.Network(
        , Node(..)
        , createNode
        , routerDatabase
+       , getRNG
        --
        , testTestInternet
        )
@@ -32,9 +33,10 @@ import           Test.Network.Socket(ListenerTable, newListenerTable)
 import           Test.Network.Socket(TestSocket, testSockets)
 import           Test.QuickCheck(Arbitrary(..), Property)
 import           Test.QuickCheck.Monadic(PropertyM, monadicIO, run, pre, assert)
+import           Test.Standard(testOptions)
 import           Tor.DataFormat.TorAddress(TorAddress(..))
 import           Tor.NetworkStack(TorNetworkStack(..))
-import           Tor.Options(TorOptions(..), defaultTorOptions)
+import           Tor.Options(TorOptions(..))
 import           Tor.RouterDesc(RouterDesc(..), blankRouterDesc)
 import           Tor.State.Credentials(Credentials, newCredentials)
 import           Tor.State.Routers(RouterDB, newTestRouterDatabase)
@@ -68,6 +70,9 @@ routerDatabase :: Internet -> IO RouterDB
 routerDatabase internet =
   withMVar (inNodes internet) $
     newTestRouterDatabase . map nodeRouterDesc . M.elems
+
+getRNG :: Internet -> MVar ChaChaDRG
+getRNG = inRNG
 
 createNode :: Internet -> TorOptions ->
               IO (RouterDesc, Credentials, TestNetworkStack)
@@ -104,7 +109,9 @@ testTestInternet =
   testGroup "Test internet checks" [
     testSockets
   , testProperty "Internet connect writes" prop_connectWrites
-  , testProperty "Internet accept reads"   prop_acceptReads
+  , testProperty "Internet accept writes"   prop_acceptWrites
+  , testProperty "Internet multiple connect writes" prop_mconnectWrites
+  , testProperty "Internet multiple accept writes"   prop_macceptWrites
   ]
 
 prop_connectWrites :: ByteString -> InternetSeed -> Word16 -> Property
@@ -115,13 +122,29 @@ prop_connectWrites bstr = twoNodeProp $ \ (_, ns1, s1) (_, ns2, s2) ->
      bstr' <- run (recv ns2 s2 len)
      assert (bstr == bstr')
 
-prop_acceptReads :: ByteString -> InternetSeed -> Word16 -> Property
-prop_acceptReads bstr = twoNodeProp $ \ (_, ns1, s1) (_, ns2, s2) ->
+prop_acceptWrites :: ByteString -> InternetSeed -> Word16 -> Property
+prop_acceptWrites bstr = twoNodeProp $ \ (_, ns1, s1) (_, ns2, s2) ->
   do let len = fromIntegral (S.length bstr)
      pre (len > 0)
      run (write ns2 s2 (L.fromStrict bstr))
      bstr' <- run (recv ns1 s1 len)
      assert (bstr == bstr')
+
+prop_mconnectWrites :: [ByteString] -> InternetSeed -> Word16 -> Property
+prop_mconnectWrites bstrs = twoNodeProp $ \ (_, ns1, s1) (_, ns2, s2) ->
+  do let bstrs' = filter (not . S.null) bstrs
+         len    = sum (map (fromIntegral . S.length) bstrs')
+     run (mapM_ (write ns1 s1 . L.fromStrict) bstrs')
+     bstrs'' <- run (recv ns2 s2 len)
+     assert (S.concat bstrs' == bstrs'')
+
+prop_macceptWrites :: [ByteString] -> InternetSeed -> Word16 -> Property
+prop_macceptWrites bstrs = twoNodeProp $ \ (_, ns1, s1) (_, ns2, s2) ->
+  do let bstrs' = filter (not . S.null) bstrs
+         len    = sum (map (fromIntegral . S.length) bstrs')
+     run (mapM_ (write ns2 s2 . L.fromStrict) bstrs')
+     bstrs'' <- run (recv ns1 s1 len)
+     assert (S.concat bstrs' == bstrs'')
 
 type Connection = (String, TestNetworkStack, TestSocket)
 
@@ -143,6 +166,3 @@ twoNodeProp doProperty seed port =
       (accSock, addr3) <- run (takeMVar askMV)
       assert (addr3 == IP4 addr2)
       doProperty (addr1, ns1, accSock) (addr2, ns2, connSock)
-
-testOptions :: TorOptions
-testOptions = defaultTorOptions { torLog = const (return ()) }

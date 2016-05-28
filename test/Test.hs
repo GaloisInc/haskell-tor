@@ -2,8 +2,7 @@ import Test.Crypto(testCrypto)
 import Test.Framework.Runners.Console(defaultMain)
 -- import Test.Handshakes
 -- import Test.HybridEncrypt
--- import Test.Link
-import Test.Network(testTestInternet)
+import Test.Link
 -- import Test.TorCell
 
 main :: IO ()
@@ -13,6 +12,5 @@ main =
 --  , torCellTests
 --  , hybridEncryptionTest
 --  , handshakeTests
-  , testTestInternet
---  , linkTests
+  , testLinks
   ]

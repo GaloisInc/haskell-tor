@@ -10,7 +10,7 @@ module Test.Network.Socket(
        )
  where
 
-import           Control.Concurrent(forkIO)
+import           Control.Concurrent(forkIO, threadDelay)
 import           Control.Concurrent.Chan(Chan, newChan, readChan, writeChan)
 import           Control.Concurrent.MVar(MVar, newMVar)
 import           Control.Concurrent.MVar(newEmptyMVar, readMVar, modifyMVar_)
@@ -68,17 +68,20 @@ newListenerTable = newIORef M.empty
 testConnect :: ListenerTable -> TorAddress ->
                String -> Word16 ->
                IO (Maybe TestSocket)
-testConnect ltableIO myAddr addr port =
-  do ltable <- readIORef ltableIO
-     case M.lookup (IP4 addr, port) ltable of
-       Nothing ->
-         do putStrLn ("keys: " ++ show (M.keys ltable))
-            putStrLn ("my key: " ++ show (IP4 addr, port))
-            return Nothing
-       Just ch ->
-         do waitMV <- newEmptyMVar
-            writeChan ch (myAddr, waitMV)
-            Just `fmap` takeMVar waitMV
+testConnect ltableIO myAddr addr port = loop (0 :: Int)
+ where
+  loop x =
+    do ltable <- readIORef ltableIO
+       case M.lookup (IP4 addr, port) ltable of
+         Nothing | x >= 10 ->
+           return Nothing
+         Nothing ->
+           do threadDelay 100000
+              loop (x + 1)
+         Just ch ->
+           do waitMV <- newEmptyMVar
+              writeChan ch (myAddr, waitMV)
+              Just `fmap` takeMVar waitMV
 
 -- -----------------------------------------------------------------------------
 
