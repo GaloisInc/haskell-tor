@@ -8,13 +8,15 @@ module Test.Network.ByteChan(
        )
  where
 
-import           Control.Concurrent.MVar(MVar, newMVar, modifyMVar, modifyMVar_)
-import           Control.Concurrent.MVar(withMVar)
+import           Control.Concurrent(forkIO)
+import           Control.Concurrent.Chan(Chan, newChan, readChan, writeChan)
+import           Control.Concurrent.MVar(MVar, newEmptyMVar, takeMVar,tryPutMVar)
+import           Control.Exception(SomeException, BlockedIndefinitelyOnMVar(..))
+import           Control.Exception(Exception(fromException), handle)
 import           Control.Monad(replicateM)
 import           Data.ByteString(ByteString)
 import qualified Data.ByteString as S
-import           Data.Sequence(Seq, (<|), (|>), ViewL(..), viewl)
-import qualified Data.Sequence as Seq
+import qualified Data.ByteString.Lazy as L
 import           System.Timeout(timeout)
 import           Test.Framework(Test, testGroup)
 import           Test.Framework.Providers.QuickCheck2(testProperty)
@@ -22,44 +24,76 @@ import           Test.QuickCheck(Property)
 import           Test.QuickCheck.Monadic(PropertyM, monadicIO, pre, run, assert)
 import           Test.Standard()
 
-newtype ByteChan = BC (MVar (Seq ByteString))
+newtype ByteChan = BC (Chan Request)
+
+data Request = Write   ByteString (MVar ())
+             | Read    Int        (MVar ByteString)
+             | IsEmpty            (MVar Bool)
+
+instance Show Request where
+  show (Write bstr _) = "WRITE(" ++ show (S.length bstr) ++ ")"
+  show (Read  amt  _) = "READ(" ++ show amt ++ ")"
+  show (IsEmpty    _) = "ISEMPTY"
 
 newByteChan :: IO ByteChan
-newByteChan = BC `fmap` newMVar Seq.empty
+newByteChan =
+  do chan <- newChan
+     _    <- forkIO (handle handleFail (runChannel L.empty [] chan))
+     return (BC chan)
+ where
+  runChannel dataStream readers chan =
+    do req <- readChan chan
+       case req of
+         Write bstr doneMV ->
+           do let dataStream' = dataStream `L.append` (L.fromStrict bstr)
+              (readers', dataStream'') <- processWaiters readers dataStream'
+              _ <- tryPutMVar doneMV ()
+              runChannel dataStream'' readers' chan
+         Read amt resMV  ->
+           do let readers' = readers ++ [(amt, resMV)]
+              (readers'', dataStream') <- processWaiters readers' dataStream
+              runChannel dataStream' readers'' chan
+         IsEmpty resMV ->
+           do _ <- tryPutMVar resMV (L.null dataStream)
+              runChannel dataStream readers chan
+  --
+  processWaiters [] strm = return ([], strm)
+  processWaiters readers@((amt, resMV) : rest) strm
+    | fromIntegral amt <= L.length strm =
+        do let (mine, strm') = L.splitAt (fromIntegral amt) strm
+           _ <- tryPutMVar resMV (L.toStrict mine)
+           processWaiters rest strm'
+    | otherwise =
+        return (readers, strm)
+  --
+  handleFail :: SomeException -> IO ()
+  handleFail e =
+    case fromException e of
+      Just BlockedIndefinitelyOnMVar ->
+        return () -- How we fail
+      _ ->
+        do putStrLn ("HANDLE_FAIL: " ++ (show e))
+           fail "Failed running byte channel thread!"
 
 readByteChan :: ByteChan -> Int -> IO ByteString
-readByteChan bc@(BC seqMV) amt =
-  do bstr <- getSome
-     let amt' = amt - fromIntegral (S.length bstr)
-     if amt' == 0
-        then return bstr
-        else do rest <- readByteChan bc amt' -- FIXME: make this block
-                return (bstr `S.append` rest)
- where
-  getSome :: IO ByteString
-  getSome = modifyMVar seqMV (yank amt)
-  --
-  yank :: Int -> Seq ByteString -> IO (Seq ByteString, ByteString)
-  yank x s =
-    case viewl s of
-      EmptyL -> return (s, S.empty)
-      bstr :< rest
-        | x <  fromIntegral (S.length bstr) ->
-           do let (res, ret) = S.splitAt (fromIntegral x) bstr
-              return (ret <| rest, res)
-        | x == fromIntegral (S.length bstr) ->
-           return (rest, bstr)
-        | otherwise ->
-           do (ret, bstr') <- yank (x - fromIntegral (S.length bstr)) rest
-              return (ret, bstr `S.append` bstr')
+readByteChan _         0   =
+  return S.empty
+readByteChan (BC chan) amt =
+  do resMV <- newEmptyMVar
+     writeChan chan (Read amt resMV)
+     takeMVar resMV
 
 writeByteChan :: ByteChan -> ByteString -> IO ()
-writeByteChan (BC seqMV) bstr =
-  modifyMVar_ seqMV $ return . (|> bstr)
+writeByteChan (BC chan) bstr =
+  do resMV <- newEmptyMVar
+     writeChan chan (Write bstr resMV)
+     takeMVar resMV
 
 isEmptyByteChan :: ByteChan -> IO Bool
-isEmptyByteChan (BC seqMV) =
-  withMVar seqMV $ return . Seq.null
+isEmptyByteChan (BC chan) =
+  do resMV <- newEmptyMVar
+     writeChan chan (IsEmpty resMV)
+     takeMVar resMV
 
 -- -----------------------------------------------------------------------------
 
