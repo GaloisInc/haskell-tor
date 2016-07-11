@@ -244,7 +244,7 @@ isBase64Char :: Word8 -> Bool
 isBase64Char x = isAlphaNum x || (x == 10) || inClass "/+=" x
 
 -- |Parse a decimal number that matches the given predicate.
-decimalNum :: (Integral a, Read a) => (a -> Bool) -> Parser a
+decimalNum :: Read a => (a -> Bool) -> Parser a
 decimalNum isOK =
   do n <- many1 decDigit
      case reads (toString n) of

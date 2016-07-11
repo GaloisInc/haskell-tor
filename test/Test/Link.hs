@@ -2,12 +2,6 @@ module Test.Link(testLinks)
  where
 
 import Control.Concurrent.Async(async, waitBoth)
-import Control.Concurrent.MVar(MVar, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception(SomeException, try)
-import Control.Monad(unless)
-import Crypto.Random(drgNewTest)
-import Data.Either(isRight)
-import Data.Word(Word64)
 import Test.Framework(Test, testGroup)
 import Test.Framework.Providers.QuickCheck2(testProperty)
 import Test.Network(InternetSeed, testTestInternet)
@@ -36,7 +30,7 @@ prop_linkConnect seed =
        rdb                  <- run (routerDatabase internet)
        cona <- run (async (connectToB  nsA credsA (getRNG internet) descB))
        acca <- run (async (acceptFromA nsB credsB (getRNG internet) descA descB rdb))
-       run (waitBoth cona acca)
+       _    <- run (waitBoth cona acca)
        assert True -- An exception would be thrown if there was a problem
  where
   connectToB nsA credsA rng descB =
@@ -47,9 +41,8 @@ prop_linkConnect seed =
        case addr of
          IP4 a | routerIPv4Address descA /= a ->
            fail "Connection from wrong IP address?"
-         IP4 a ->
+         IP4 _ ->
            return ()
          _ ->
            fail "Connection from non-IP4 address?"
        acceptLink credsB routerDB rng (const (return ())) sock addr
-

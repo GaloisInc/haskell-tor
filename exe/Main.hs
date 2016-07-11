@@ -75,6 +75,7 @@ main = runDefaultMain $ \ flags ->
          do sock <- torConnect tor addr 80
             torWrite sock (buildGet "/")
             resp <- readLoop sock
+            putStrLn ("Got a " ++ show (L.length resp) ++ " byte response!")
             torClose sock ReasonDone
 
 buildGet :: String -> ByteString
@@ -143,7 +144,7 @@ initializeSystem flags =
 # if defined(VERSION_hans)
 startTapNetworkStack :: [Flag] -> String ->
                         IO (SomeNetworkStack, String -> IO ())
-startTapNetworkStack flags tapName =
+startTapNetworkStack _ tapName =
   do mfd <- openTapDevice tapName
      case mfd of
        Nothing ->
