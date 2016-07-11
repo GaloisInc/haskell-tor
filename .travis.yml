@@ -13,13 +13,21 @@ matrix:
     - env: CABALVER=1.18 GHCVER=7.8.4  NETWORK=-f-network HANS=-hans
       addons: {apt: {packages: [cabal-install-1.18,ghc-7.8.4], sources: [hvr-ghc]}}
     - env: CABALVER=1.22 GHCVER=7.10.2 NETWORK=-fnetwork  HANS=+hans
-      addons: {apt: {packages: [cabal-install-1.22,ghc-7.10.2],sources: [hvr-ghc]}}
+      addons: {apt: {packages: [cabal-install-1.22,ghc-7.10.3],sources: [hvr-ghc]}}
     - env: CABALVER=1.22 GHCVER=7.10.2 NETWORK=-f-network HANS=+hans
-      addons: {apt: {packages: [cabal-install-1.22,ghc-7.10.2],sources: [hvr-ghc]}}
+      addons: {apt: {packages: [cabal-install-1.22,ghc-7.10.3],sources: [hvr-ghc]}}
     - env: CABALVER=1.22 GHCVER=7.10.2 NETWORK=-fnetwork  HANS=-hans
-      addons: {apt: {packages: [cabal-install-1.22,ghc-7.10.2],sources: [hvr-ghc]}}
+      addons: {apt: {packages: [cabal-install-1.22,ghc-7.10.3],sources: [hvr-ghc]}}
     - env: CABALVER=1.22 GHCVER=7.10.2 NETWORK=-f-network HANS=-hans
-      addons: {apt: {packages: [cabal-install-1.22,ghc-7.10.2],sources: [hvr-ghc]}}
+      addons: {apt: {packages: [cabal-install-1.22,ghc-7.10.3],sources: [hvr-ghc]}}
+    - env: CABALVER=1.22 GHCVER=7.10.2 NETWORK=-fnetwork  HANS=+hans
+      addons: {apt: {packages: [cabal-install-1.24,ghc-8.0.1],sources: [hvr-ghc]}}
+    - env: CABALVER=1.22 GHCVER=7.10.2 NETWORK=-f-network HANS=+hans
+      addons: {apt: {packages: [cabal-install-1.24,ghc-8.0.1],sources: [hvr-ghc]}}
+    - env: CABALVER=1.22 GHCVER=7.10.2 NETWORK=-fnetwork  HANS=-hans
+      addons: {apt: {packages: [cabal-install-1.24,ghc-8.0.1],sources: [hvr-ghc]}}
+    - env: CABALVER=1.22 GHCVER=7.10.2 NETWORK=-f-network HANS=-hans
+      addons: {apt: {packages: [cabal-install-1.24,ghc-8.0.1],sources: [hvr-ghc]}}
     - env: CABALVER=head GHCVER=head   NETWORK=-fnetwork  HANS=+hans
       addons: {apt: {packages: [cabal-install-head,ghc-head],  sources: [hvr-ghc]}}
     - env: CABALVER=head GHCVER=head   NETWORK=-f-network HANS=+hans
@@ -30,10 +38,10 @@ matrix:
       addons: {apt: {packages: [cabal-install-head,ghc-head],  sources: [hvr-ghc]}}
 
   allow_failures:
-    - env: CABALVER=head GHCVER=head   NETWORK=-fnetwork  HANS=+hans HANSCONST=--constraint="hans -web-server"
-    - env: CABALVER=head GHCVER=head   NETWORK=-f-network HANS=+hans HANSCONST=--constraint="hans -web-server"
-    - env: CABALVER=head GHCVER=head   NETWORK=-fnetwork  HANS=-hans HANSCONST=
-    - env: CABALVER=head GHCVER=head   NETWORK=-f-network HANS=-hans HANSCONST=
+    - env: CABALVER=head GHCVER=head   NETWORK=-fnetwork  HANS=+hans
+    - env: CABALVER=head GHCVER=head   NETWORK=-f-network HANS=+hans
+    - env: CABALVER=head GHCVER=head   NETWORK=-fnetwork  HANS=-hans
+    - env: CABALVER=head GHCVER=head   NETWORK=-f-network HANS=-hans
 
 before_install:
  - export PATH=/opt/ghc/$GHCVER/bin:/opt/cabal/$CABALVER/bin:$PATH
@@ -41,8 +49,8 @@ before_install:
 install:
  - cabal sandbox init
  - cabal update
- - cabal install --only-dependencies --enable-tests $NETWORK -f$HANS --constraint="tls $HANS" $HANSCONST
- - cabal configure --enable-tests $NETWORK -f$HANS --constraint="tls $HANS" $HANSCONST
+ - cabal install --only-dependencies --enable-tests $NETWORK -f$HANS --constraint="tls $HANS"
+ - cabal configure --enable-tests $NETWORK -f$HANS --constraint="tls $HANS"
 
 script:
  - cabal build
