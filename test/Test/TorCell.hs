@@ -1,11 +1,7 @@
-{-# LANGUAGE CPP               #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE RecordWildCards   #-}
 module Test.TorCell(torCellTests) where
 
-#if !MIN_VERSION_base(4,8,0)
-import Control.Applicative
-#endif
 import Control.Monad
 import Crypto.Hash
 import Data.ASN1.OID
@@ -18,11 +14,13 @@ import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy  as BSL
 import Data.ByteString.Lazy(toStrict,fromStrict)
 import Data.Hourglass
-import Data.List
+import Data.List hiding (maximum)
 import Data.String
 import Data.Word
 import Data.X509
 import Numeric
+import Prelude()
+import Prelude.Compat
 import Test.QuickCheck
 import Test.Framework
 import Test.Framework.Providers.QuickCheck2

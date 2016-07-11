@@ -1,16 +1,13 @@
-{-# LANGUAGE CPP #-}
 module Test.HybridEncrypt(hybridEncryptionTest)
  where
 
-#if !MIN_VERSION_base(4,8,0)
-import Control.Applicative
-#endif
 import Crypto.PubKey.RSA
-import Control.Applicative
 import Control.Monad
 import Crypto.Random
 import Data.ByteString(ByteString,pack)
 import qualified Data.ByteString as BS
+import Prelude()
+import Prelude.Compat
 import Test.Framework
 import Test.Framework.Providers.QuickCheck2
 import Test.QuickCheck

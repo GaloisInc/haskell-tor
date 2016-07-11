@@ -1,5 +1,4 @@
 -- |Credential management for a Tor node.
-{-# LANGUAGE CPP               #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE RecordWildCards   #-}
 module Tor.State.Credentials(
@@ -19,9 +18,7 @@ module Tor.State.Credentials(
  where
 
 import Control.Concurrent
-#if MIN_VERSION_cryptonite(0,9,0)
 import Crypto.Error
-#endif
 import Crypto.Hash
 import Crypto.Hash.Easy
 import Crypto.PubKey.Curve25519 as Curve
@@ -32,20 +29,14 @@ import Crypto.Random
 import Data.ASN1.OID
 import Data.ByteString(ByteString)
 import Data.Hourglass
-#if MIN_VERSION_base(4,8,0)
-import Data.List(sortOn)
-#else
-import Data.List(sortBy)
-import Data.Ord(comparing)
-#endif
+import Data.List.Compat(sortOn)
 import Data.Map.Strict(Map,empty,insertWith,toList)
-#if !MIN_VERSION_base(4,8,0)
-import Data.Monoid
-#endif
 import Data.String
 import Data.Word
 import Data.X509
 import Hexdump
+import Prelude()
+import Prelude.Compat
 import System.Hourglass
 import Tor.DataFormat.TorAddress
 import Tor.Options
@@ -228,12 +219,8 @@ maybeRegenOnion force now state | force || (now > expiration) = (state', True)
          Right privkey -> (privkey, rng')
   (privntor, g'') = findKey g'
   pubntor = toPublic privntor
-#if MIN_VERSION_cryptonite(0,9,0)
   toEither (CryptoPassed x) = Right x
   toEither (CryptoFailed e) = Left (show e)
-#else
-  toEither = id
-#endif
   --
   state' = state{ credRNG = g'', credNextSerialNum = serial + 1
                 , credOnion = (cert, PrivKeyRSA priv)
@@ -315,10 +302,3 @@ isSignedBy cert bycert =
   toVerify HashSHA384 = verify (Just SHA384)
   toVerify HashSHA512 = verify (Just SHA512)
   toVerify _          = \ _ _ _ -> False
-
-
-#if !MIN_VERSION_base(4,8,0)
-sortOn :: Ord b => (a -> b) -> [a] -> [a]
-sortOn f =
-  map snd . sortBy (comparing fst) . map (\x -> let y = f x in y `seq` (y, x))
-#endif

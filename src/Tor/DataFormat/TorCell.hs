@@ -10,9 +10,6 @@ module Tor.DataFormat.TorCell(
        )
  where
 
-#if !MIN_VERSION_base(4,8,0)
-import Control.Applicative
-#endif
 import Control.Exception
 import Control.Monad
 import Data.Binary.Get
@@ -23,6 +20,8 @@ import qualified Data.ByteString.Lazy as BSL
 import Data.Typeable
 import Data.X509
 import Data.Word
+import Prelude()
+import Prelude.Compat
 import Tor.DataFormat.TorAddress
 
 -- |A raw tor cell.

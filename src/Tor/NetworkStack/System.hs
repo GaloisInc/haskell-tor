@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP #-}
 -- |Routines for integrating Tor with the standard network library.
 module Tor.NetworkStack.System(systemNetworkStack) where
 

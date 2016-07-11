@@ -13,9 +13,6 @@ module Tor.Link(
        )
  where
 
-#if !MIN_VERSION_base(4,8,0)
-import Control.Applicative
-#endif
 import Control.Concurrent
 import Control.Exception
 import Control.Monad
@@ -38,15 +35,14 @@ import Data.Hourglass
 import Data.IORef
 import Data.Map.Strict(Map)
 import qualified Data.Map.Strict as Map
-#if !MIN_VERSION_base(4,8,0)
-import Data.Monoid
-#endif
 import qualified Data.Serialize.Get as Cereal
 import Data.Tuple(swap)
 import Data.Word
 import Data.X509 hiding (HashSHA1, HashSHA256)
 import Data.X509.CertificateStore
 import Network.TLS hiding (Credentials)
+import Prelude()
+import Prelude.Compat
 import qualified Network.TLS as TLS
 import System.Hourglass
 import Tor.DataFormat.RelayCell

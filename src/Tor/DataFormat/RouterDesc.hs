@@ -1,4 +1,3 @@
-{-# LANGUAGE CPP               #-}
 {-# LANGUAGE MultiWayIf        #-}
 {-# LANGUAGE OverloadedStrings #-}
 -- |Routines for parsing router descriptions from a directory listing.
@@ -8,9 +7,7 @@ module Tor.DataFormat.RouterDesc(
  where
 
 import Control.Applicative
-#if MIN_VERSION_cryptonite(0,9,0)
 import Crypto.Error
-#endif
 import Crypto.Hash.Easy
 import qualified Crypto.PubKey.Curve25519 as Curve
 import Crypto.PubKey.RSA.PKCS15
@@ -311,16 +308,10 @@ ntorOnionKey r =
   do _ <- string "ntor-onion-key"
      _ <- whitespace
      x <- decodeBase64 =<< manyTill base64Char newline
-     case toEither (Curve.publicKey x) of
-       Left err -> fail ("Failure decoding curve25519 public key: " ++ err)
-       Right k  -> return r{ routerNTorOnionKey = Just k }
- where
-#if MIN_VERSION_cryptonite(0,9,0)
-   toEither (CryptoPassed x) = Right x
-   toEither (CryptoFailed e) = Left (show e)
-#else
-   toEither = id
-#endif
+     case Curve.publicKey x of
+       CryptoPassed k -> return r{ routerNTorOnionKey = Just k}
+       CryptoFailed e ->
+         fail ("Failure decoding curve25519 public key: " ++ show e)
 
 signingKey :: RouterDesc -> Parser RouterDesc
 signingKey r =

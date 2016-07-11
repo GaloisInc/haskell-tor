@@ -12,10 +12,6 @@ module Tor.State.Routers(
        )
  where
 
-#if !MIN_VERSION_base(4,8,0)
-import Control.Applicative
-import Data.Foldable(find)
-#endif
 import Control.Concurrent
 import Control.Monad
 import Crypto.Hash.Easy
@@ -27,14 +23,13 @@ import Data.Bits
 import Data.Serialize.Get
 import Data.ByteString(ByteString,unpack)
 import Data.Hourglass
-import Data.List
-#if !MIN_VERSION_base(4,8,0)
-    hiding (find)
-#endif
+import Data.List.Compat hiding (elem, length, any)
 import qualified Data.Map.Strict as Map
 import Data.Maybe
 import Data.Word
 import MonadLib
+import Prelude()
+import Prelude.Compat
 import System.Hourglass
 import Tor.DataFormat.Consensus
 import Tor.DataFormat.RelayCell

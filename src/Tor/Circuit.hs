@@ -61,9 +61,7 @@ import qualified Data.ByteString as S
 import qualified Data.ByteString.Char8 as S8
 import qualified Data.ByteString.Lazy as L
 import Data.Either
-#if !MIN_VERSION_base(4,8,0)
 import Data.Foldable hiding (all,forM_)
-#endif
 import Data.IntSet(IntSet)
 import qualified Data.IntSet as IntSet
 import Data.Maybe
@@ -74,9 +72,7 @@ import Data.Word
 import Data.X509
 import Hexdump
 import Network.TLS(HasBackend)
-#if !MIN_VERSION_base(4,8,0)
 import Prelude hiding (mapM_)
-#endif
 import Tor.DataFormat.RelayCell
 import Tor.DataFormat.TorAddress
 import Tor.DataFormat.TorCell
@@ -1068,11 +1064,6 @@ modifyMVar' mv f = modifyMVar mv (return . f)
 modifyMVar_' :: MVar a -> (a -> a) -> IO ()
 modifyMVar_' mv f = modifyMVar_ mv (return . f)
 
-#if MIN_VERSION_cryptonite(0,9,0)
 toEither :: CryptoFailable a -> Either String a
 toEither (CryptoPassed x) = Right x
 toEither (CryptoFailed e) = Left (show e)
-#else
-toEither :: Either String a -> Either String a
-toEither = id
-#endif
