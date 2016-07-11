@@ -30,10 +30,10 @@ matrix:
       addons: {apt: {packages: [cabal-install-head,ghc-head],  sources: [hvr-ghc]}}
 
   allow_failures:
-    - env: CABALVER=head GHCVER=head   NETWORK=-fnetwork  HANS=+hans
-    - env: CABALVER=head GHCVER=head   NETWORK=-f-network HANS=+hans
-    - env: CABALVER=head GHCVER=head   NETWORK=-fnetwork  HANS=-hans
-    - env: CABALVER=head GHCVER=head   NETWORK=-f-network HANS=-hans
+    - env: CABALVER=head GHCVER=head   NETWORK=-fnetwork  HANS=+hans HANSCONST=--constraint="hans -web-server"
+    - env: CABALVER=head GHCVER=head   NETWORK=-f-network HANS=+hans HANSCONST=--constraint="hans -web-server"
+    - env: CABALVER=head GHCVER=head   NETWORK=-fnetwork  HANS=-hans HANSCONST=
+    - env: CABALVER=head GHCVER=head   NETWORK=-f-network HANS=-hans HANSCONST=
 
 before_install:
  - export PATH=/opt/ghc/$GHCVER/bin:/opt/cabal/$CABALVER/bin:$PATH
@@ -41,8 +41,8 @@ before_install:
 install:
  - cabal sandbox init
  - cabal update
- - cabal install --only-dependencies --enable-tests $NETWORK -f$HANS --constraint="tls $HANS"
- - cabal configure --enable-tests $NETWORK -f$HANS --constraint="tls $HANS"
+ - cabal install --only-dependencies --enable-tests $NETWORK -f$HANS --constraint="tls $HANS" $HANSCONST
+ - cabal configure --enable-tests $NETWORK -f$HANS --constraint="tls $HANS" $HANSCONST
 
 script:
  - cabal build
