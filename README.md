@@ -1,5 +1,7 @@
 # A Tor Implementation in Haskell
 
+[![Build Status](https://secure.travis-ci.org/GaloisInc/haskell-tor.svg?branch=master)](http://travis-ci.org/GaloisInc/haskell-tor)
+
     This version of haskell-tor is (C) 2015 Galois, Inc., and distributed under
     a standard, three-clause BSD license. Please see the file LICENSE,
     distributed with this software, for specific terms and conditions.
