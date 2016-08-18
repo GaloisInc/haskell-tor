@@ -45,8 +45,12 @@ import qualified Data.Serialize.Get as Cereal
 import Data.Tuple(swap)
 import Data.Word
 import Data.X509 hiding (HashSHA1, HashSHA256)
-import Data.X509.CertificateStore
-import Network.TLS hiding (Credentials)
+import Data.X509.CertificateStore (makeCertificateStore)
+import Network.TLS (Context, Cipher, Version, SignatureAlgorithm (..)
+                    , HashAlgorithm (..), ServerParams (..), Supported (..)
+                    , Version (..), ServerHooks (..), CertificateUsage (..)
+                    , ServerParams (..), Shared (..), HasBackend
+                    , ClientParams (..), ClientHooks (..))
 import qualified Network.TLS as TLS
 import System.Hourglass
 import Tor.DataFormat.RelayCell
@@ -87,14 +91,14 @@ linkRead link circ =
 
 -- |Write a cell to the link.
 linkWrite :: TorLink -> TorCell -> IO ()
-linkWrite link cell = sendData (linkContext link) (putCell cell)
+linkWrite link cell = TLS.sendData (linkContext link) (putCell cell)
 
 -- |Close the link
 linkClose :: TorLink -> IO ()
 linkClose link =
-  do killThread   (linkReaderThread link)
-     bye          (linkContext link)
-     contextClose (linkContext link)
+  do killThread       (linkReaderThread link)
+     TLS.bye          (linkContext link)
+     TLS.contextClose (linkContext link)
 
 -- |Create a direct link to the given tor node.  note that this routine performs
 -- some internal certificate checking, but you should verify that the
@@ -126,11 +130,11 @@ initLink ns creds rngMV llog them =
             let tcreds = TLS.Credentials [((CertificateChain [authCert,idCert]),
                                           PrivKeyRSA authPriv)]
             serverCertsIO <- newIORef (CertificateChain [])
-            tls <- contextNew sock (clientTLSOpts "FIXME" tcreds serverCertsIO)
-            handshake tls
+            tls <- TLS.contextNew sock (clientTLSOpts "FIXME" tcreds serverCertsIO)
+            TLS.handshake tls
             -- send out our initial message
             let vers = putCell Versions
-            sendData tls vers
+            TLS.sendData tls vers
             -- get their initial message
             serverCerts <- readIORef serverCertsIO
             (r2i, left, rLink, rCert, myAddr) <- getRespInitialMsgs tls serverCerts
@@ -138,7 +142,7 @@ initLink ns creds rngMV llog them =
             -- build and send the CERTS message
             let certs = putCell (Certs [RSA1024Identity idCert,
                                         RSA1024Auth authCert])
-            sendData tls certs
+            TLS.sendData tls certs
             -- build and send the AUTHENTICATE message
             let i2r = BSL.toStrict (vers `BSL.append` certs)
                 idCert' = signedObject (getSigned idCert)
@@ -147,11 +151,11 @@ initLink ns creds rngMV llog them =
             let signedBit = hdr `BS.append` rand
             Right sig <- signSafer noHash authPriv (sha256 signedBit)
             let msg = signedBit `BS.append` sig
-            sendData tls $ putCell (Authenticate msg)
+            TLS.sendData tls $ putCell (Authenticate msg)
             -- finally, build and send the NETINFO message
             let ni = NetInfo (fromElapsed (timeGetElapsed now))
                              (IP4 (routerIPv4Address them)) myAddrs'
-            sendData tls (putCell ni)
+            TLS.sendData tls (putCell ni)
             -- ... and return the link pointer
             llog ("Created new link to " ++ routerIPv4Address them ++
                   if null (routerNickname them) then "" else
@@ -178,7 +182,7 @@ runLink llog rChansMV context initialBS =
       Fail _ _ e   -> llog ("Error reading link: " ++ e)
       Partial next ->
         case bstrs of
-          []       -> recvData context >>= (\ b -> run x [b])
+          []       -> TLS.recvData context >>= (\ b -> run x [b])
           (f:rest) -> run (next (Just f)) rest
       Done r1 _ c  -> process c >> run initialState (r1:bstrs)
   --
@@ -276,11 +280,11 @@ getRespInitialMsgs tls (CertificateChain tlsCerts) =
         do let (accchunk, leftover) = BS.splitAt (fromIntegral i) lastBS
            return (acc `BS.append` accchunk, leftover, a, b)
       Partial next     ->
-        do b <- recvData tls
+        do b <- TLS.recvData tls
            let getter' = next (Just b)
            getBaseCells getter' b (acc `BS.append` lastBS)
   --
-  netinfoDecodeStart l = 
+  netinfoDecodeStart l =
     case runGetIncremental getNetInfoCell of
       f@(Fail _ _ _) -> f
       d@(Done _ _ _) -> d
@@ -292,7 +296,7 @@ getRespInitialMsgs tls (CertificateChain tlsCerts) =
       Done leftover _ x ->
         return (leftover, x)
       Partial next ->
-        do b <- recvData tls
+        do b <- TLS.recvData tls
            let getter' = next (Just b)
            getNetInfoCellBit getter'
 
@@ -348,10 +352,10 @@ authMessageHeader tls iIdent rIdent r2i i2r rLink =
          slog   = sha256 r2i
          clog   = sha256 i2r
          scert  = sha256 (encodeSignedObject rLink)
-     ctxt <- nothingError <$> contextGetInformation tls
-     let cRandom = unClientRandom (nothingError (infoClientRandom ctxt))
-         sRandom = unServerRandom (nothingError (infoServerRandom ctxt))
-         masterSecret = nothingError (infoMasterSecret ctxt)
+     ctxt <- nothingError <$> TLS.contextGetInformation tls
+     let cRandom = TLS.unClientRandom (nothingError (TLS.infoClientRandom ctxt))
+         sRandom = TLS.unServerRandom (nothingError (TLS.infoServerRandom ctxt))
+         masterSecret = nothingError (TLS.infoMasterSecret ctxt)
      let ccert      = pack "Tor V3 handshake TLS cross-certification\0"
          blob       = BS.concat [convert cRandom, convert sRandom, ccert]
          tlssecrets = convert (hmac masterSecret blob :: HMAC SHA256)
@@ -381,9 +385,9 @@ clientTLSOpts target creds ccio = ClientParams {
   , clientWantSessionResume        = Nothing
   , clientShared                   = Shared {
       sharedCredentials            = creds
-    , sharedSessionManager         = noSessionManager
+    , sharedSessionManager         = TLS.noSessionManager
     , sharedCAStore                = makeCertificateStore []
-    , sharedValidationCache        = exceptionValidationCache []
+    , sharedValidationCache        = TLS.exceptionValidationCache []
     }
   , clientHooks                    = ClientHooks {
       onCertificateRequest         = const (return (getRealCreds creds))
@@ -399,13 +403,14 @@ clientTLSOpts target creds ccio = ClientParams {
                                       suiteTLS_DHE_RSA_WITH_AES_128_CBC_SHA,
                                       suiteTLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA,
                                       suiteTLS_DHE_RSA_WITH_AES_256_CBC_SHA256]
-    , supportedCompressions        = [nullCompression]
+    , supportedCompressions        = [TLS.nullCompression]
     , supportedHashSignatures      = [(HashSHA1,   SignatureRSA),
                                       (HashSHA256, SignatureRSA)]
     , supportedSecureRenegotiation = True
     , supportedSession             = False
     , supportedFallbackScsv        = True
     , supportedClientInitiatedRenegotiation = True
+    , supportedEmptyPacket         = True
     }
   }
  where
@@ -454,27 +459,27 @@ acceptLink creds routerDB rngMV llog sock who =
                               (return . genCertificate idKey validity)
     let tcreds = TLS.Credentials [(CertificateChain [linkCert, idCert],
                                    PrivKeyRSA linkPriv)]
-    tls <- contextNew sock (serverTLSOpts tcreds)
+    tls <- TLS.contextNew sock (serverTLSOpts tcreds)
     (versions, iversstr) <- getVersions tls
     unless (4 `elem` versions) $ fail "Link doesn't support version 4."
     -- "The responder sends a VERSIONS cell, ..."
     let versstr = putCell Versions
-    sendData tls versstr
+    TLS.sendData tls versstr
     -- "... a CERTS cell (4.2 below) to give the initiator the certificates
     -- it needs to learn the responder's identity, ..."
     let certsbstr = putCell (Certs [RSA1024Identity idCert,
                                     LinkKeyCert linkCert])
 
-    sendData tls certsbstr
+    TLS.sendData tls certsbstr
     -- "... an AUTH_CHALLENGE cell (4.3) that the initiator must include as
     -- part of its answer if it chooses to authenticate, ..."
     chalBStr <- modifyMVar rngMV (return . swap . randomBytesGenerate 32)
     let authcbstr = putCell (AuthChallenge chalBStr [1])
-    sendData tls authcbstr
+    TLS.sendData tls authcbstr
     -- "... and a NETINFO cell (4.5) "
     others <- getAddresses creds
     epochsec <- fromElapsed <$> timeCurrent
-    sendData tls (putCell (NetInfo epochsec who others))
+    TLS.sendData tls (putCell (NetInfo epochsec who others))
     -- "At this point the initiator may send a NETINFO cell if it does not
     -- wish to authenticate, or a CERTS cell, an AUTHENTICATE cell, and a
     -- NETINFO cell if it does."
@@ -563,10 +568,10 @@ acceptLink creds routerDB rngMV llog sock who =
            --                 "Tor V3 handshake TLS cross-certificate"
            --              [32 octets]
            let (tlssecrets, rest7) = BS.splitAt 32 rest6
-           ctxt <- nothingError <$> contextGetInformation tls
-           let cRandom = unClientRandom (nothingError (infoClientRandom ctxt))
-               sRandom = unServerRandom (nothingError (infoServerRandom ctxt))
-               masterSecret = nothingError (infoMasterSecret ctxt)
+           ctxt <- nothingError <$> TLS.contextGetInformation tls
+           let cRandom = TLS.unClientRandom (nothingError (TLS.infoClientRandom ctxt))
+               sRandom = TLS.unServerRandom (nothingError (TLS.infoServerRandom ctxt))
+               masterSecret = nothingError (TLS.infoMasterSecret ctxt)
            let ccert       = pack "Tor V3 handshake TLS cross-certification\0"
                blob        = BS.concat [cRandom, sRandom, ccert]
                tlssecrets' = convert (hmac masterSecret blob :: HMAC SHA256)
@@ -604,9 +609,9 @@ serverTLSOpts creds = ServerParams {
   , serverDHEParams                = Just oakley2
   , serverShared                   = Shared {
       sharedCredentials            = creds
-    , sharedSessionManager         = noSessionManager
+    , sharedSessionManager         = TLS.noSessionManager
     , sharedCAStore                = makeCertificateStore []
-    , sharedValidationCache        = exceptionValidationCache []
+    , sharedValidationCache        = TLS.exceptionValidationCache []
     }
   , serverHooks                    = ServerHooks {
       onClientCertificate          = const (return CertificateUsageAccept) -- FIXME?
@@ -615,6 +620,7 @@ serverTLSOpts creds = ServerParams {
     , onSuggestNextProtocols       = return Nothing
     , onNewHandshake               = \ _ -> return True -- FIXME?
     , onALPNClientSuggest          = Nothing
+    , onServerNameIndication       = const $ return (TLS.Credentials []) -- FIXME?
     }
   , serverSupported                = Supported {
       supportedVersions            = [TLS12]
@@ -622,13 +628,14 @@ serverTLSOpts creds = ServerParams {
                                       suiteTLS_DHE_RSA_WITH_AES_128_CBC_SHA,
                                       suiteTLS_DHE_RSA_WITH_3DES_EDE_CBC_SHA,
                                       suiteTLS_DHE_RSA_WITH_AES_256_CBC_SHA256]
-    , supportedCompressions        = [nullCompression]
+    , supportedCompressions        = [TLS.nullCompression]
     , supportedHashSignatures      = [(HashSHA1,   SignatureRSA),
                                       (HashSHA256, SignatureRSA)]
     , supportedSecureRenegotiation = True
     , supportedSession             = False
     , supportedFallbackScsv        = True
     , supportedClientInitiatedRenegotiation = True
+    , supportedEmptyPacket         = True
     }
   }
  where
@@ -649,7 +656,7 @@ isEquivList :: Eq a => [a] -> [a] -> Bool
 isEquivList xs ys = (length xs == length ys) && and (map (`elem` ys) xs)
 
 isV2PlusCipherSet :: [Cipher] -> Bool
-isV2PlusCipherSet suites = 
+isV2PlusCipherSet suites =
   -- FIXME: This is wrong, as the last test should be "and there's another
   -- one that isn't one of those three"
   (suiteTLS_DHE_RSA_WITH_AES_256_CBC_SHA  `elem` suites) &&
@@ -693,7 +700,7 @@ fixedCipherList = [
 
 getVersions :: Context -> IO ([Word16], BSL.ByteString)
 getVersions tls =
-  do bstr <- BSL.fromStrict <$> recvData tls
+  do bstr <- BSL.fromStrict <$> TLS.recvData tls
      return (runGet getVersions' bstr, bstr)
  where
   getVersions' =
@@ -710,7 +717,7 @@ getInitiatorInfo tls = getCells base
   getCells (Fail _ _ str)  = fail str
   getCells (Done rest _ x) = return (x, rest)
   getCells (Partial f)     =
-    do next <- recvData tls
+    do next <- TLS.recvData tls
        getCells (f (Just next))
   --
   base = runGetIncremental (run Nothing Nothing Nothing)
