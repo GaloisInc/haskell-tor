@@ -484,6 +484,24 @@ processForwardInput ns circ cell =
     tcLog circ ("Caught exception processing backwards input: "
                   ++ show (e :: SomeException))
 
+
+#if !MIN_VERSION_base(4,7,0)
+-- Note that this implementation is flawed and requires extra care to avoid
+-- blocking on putMVar.
+-- See the discussion on
+-- https://mail.haskell.org/pipermail/haskell-cafe/2004-September/006732.html
+tryReadMVar :: MVar a -> IO (Maybe a)
+tryReadMVar mv =
+  do mc <- tryTakeMVar mv
+     case mc of
+       Nothing -> return mc
+       Just v  -> putMVar mv v >> return mc
+
+isLeft :: Either a b -> Bool
+isLeft Left {} = True
+isLeft _ = False
+#endif
+
 processForwardRelay :: HasBackend s =>
                        TorNetworkStack ls s -> TransverseCircuit s ->
                        Word32 -> ByteString ->
