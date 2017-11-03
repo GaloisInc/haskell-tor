@@ -104,8 +104,10 @@ fetch ns host tcpport item =
                   Left err   -> return (Left err)
                   Right body ->
                     case decompress body of
-                      Nothing    -> return (Left "Decompression failure.")
-                      Just body' -> return (parseBlob (L.toStrict body'))
+                      Left err    ->
+                        return (Left ("Decompression failure: " ++ show err))
+                      Right body' ->
+                        return (parseBlob (L.toStrict body'))
             `finally` close ns sock
  where
   timeout' tm io =
@@ -138,7 +140,7 @@ readResponse ns sock = getResponse (parse httpResponse)
               return (Left msg)
          Partial f ->
            getResponse f
-         Done res () ->
+         Data.Attoparsec.ByteString.Done res () ->
            (Right . L.fromChunks . (res:)) `fmap` lazyRead
   --
   lazyRead :: IO [ByteString]
